@@ -4,10 +4,51 @@ from pathlib import Path
 import pandas as pd
 import PySimpleGUIQt as sg
 import main
+from datetime import date
 
 OUTPUT_EXCEL = Path("vysledek.xlsx")
+AGG_DATE_PLACEHOLDER = "XX-XX-XXXX"  # datum v agregovaném režimu
+# --- vizuální zarovnání buněk v řádku tabulky ---
+CELL_PAD = (0, 5)                 # pro všechny Text buňky
+BTN_PAD  = ((0, 0), (-5,5))      # pro Button – zvedne ho cca o 6 px (případně uprav na -4 / -8)
 
-# pomocná funkce: najde skutečný název sloupce (case-insensitive, ořezané mezery)
+
+# ===================== Pomocné funkce =====================
+
+def _refresh_table_inplace(w, df_full, col_k, agg_flag):
+    """
+    Překreslí obsah sloupce '-COL-' BEZ zavření okna.
+    Vrací (w, buy_map): w = stejný (nebo výjimečně nové okno při fallbacku), buy_map = nová mapa tlačítek.
+    Když už není co zobrazit, vrátí (None, None).
+    """
+    new_rows_layout, buy_map = _build_table_layout(df_full, col_k, aggregate=agg_flag)
+    if new_rows_layout is None:
+        return None, None
+
+    # zachovej přesně stejnou pozici okna i po update layoutu
+    pos = _safe_loc(w)
+    try:
+        w['-COL-'].update(layout=new_rows_layout)
+        if pos:
+            try:
+                w.move(pos[0], pos[1])   # ← klíčový trik proti „poskoku“
+            except Exception:
+                pass
+        try:
+            w['-AGG-'].update(value=bool(agg_flag))
+        except Exception:
+            pass
+        return w, buy_map
+    except Exception:
+        # fallback – znovu vytvořit okno přesně na stejné pozici
+        try:
+            loc = pos or w.current_location()
+        except Exception:
+            loc = None
+        w.close()
+        w, buy_map = _create_results_window(df_full, col_k, agg_flag, location=loc)
+        return w, buy_map
+    
 def _find_col(df, candidates):
     cols = {c.strip().lower(): c for c in df.columns}
     for cand in candidates:
@@ -16,10 +57,34 @@ def _find_col(df, candidates):
             return cols[key]
     return None
 
+def _to_date_col(df, col_name="datum"):
+    if col_name in df.columns:
+        df[col_name] = pd.to_datetime(df[col_name], errors="coerce").dt.date
+
+def _safe_loc(win):
+    """Bezpečně vrátí (x, y) pozici okna, nebo None."""
+    try:
+        x, y = win.current_location()
+        return int(x), int(y)
+    except Exception:
+        return None
+    
+def _fmt_cz_date(v):
+    try:
+        if isinstance(v, date):
+            return f"{v:%d.%m.%Y}"
+    except Exception:
+        pass
+    try:
+        dt = pd.to_datetime(v, errors="coerce")
+        if pd.isna(dt):
+            return ""
+        return dt.strftime("%d.%m.%Y")
+    except Exception:
+        return str(v) if v is not None else ""
 
 def ensure_output_excel(data):
-    """Zajistí, že v Excelu existuje sloupec 'koupeno' a že se při přepisování zachovají existující hodnoty."""
-    df = None
+    """Zachová 'koupeno'; sjednotí datum na typ date (bez času)."""
     if isinstance(data, pd.DataFrame):
         df_new = data.copy()
     else:
@@ -28,14 +93,12 @@ def ensure_output_excel(data):
         except Exception:
             return
 
-    # základní normalizace
     df_new = df_new.fillna("")
     df_new.columns = df_new.columns.str.strip()
+    _to_date_col(df_new, "datum")
 
-    # najdeme, jestli new už obsahuje sloupec koupeno
     new_k = _find_col(df_new, ["koupeno"])
 
-    # pokud výstupní soubor ještě neexistuje, chovejme se jako dříve
     if not OUTPUT_EXCEL.exists():
         if new_k is None:
             df_new["koupeno"] = False
@@ -45,11 +108,9 @@ def ensure_output_excel(data):
             pass
         return
 
-    # pokud existuje starý soubor, načteme ho a pokusíme se zachovat koupeno
     try:
-        df_old = pd.read_excel(OUTPUT_EXCEL).fillna("")
+        df_old = pd.read_excel(OUTPUT_EXCEL)
     except Exception:
-        # pokud nelze načíst starý soubor, fallback: vytvořit nový jak dříve
         if new_k is None:
             df_new["koupeno"] = False
         try:
@@ -58,28 +119,25 @@ def ensure_output_excel(data):
             pass
         return
 
+    df_old = df_old.fillna("")
     df_old.columns = df_old.columns.str.strip()
+    _to_date_col(df_old, "datum")
+
     old_k = _find_col(df_old, ["koupeno"])
     if old_k is None:
         df_old["koupeno"] = False
         old_k = "koupeno"
 
-    # klíčové sloupce pro porovnání = všechny sloupce new kromě 'koupeno'
     key_cols = [c for c in df_new.columns if c.strip().lower() != "koupeno"]
-
-    # zajistíme, že df_old má všechny key_cols (jinak doplníme prázdnými řetězci)
     for c in key_cols:
         if c not in df_old.columns:
             df_old[c] = ""
 
-    # připravíme subset starého souboru obsahující jen key_cols a staré 'koupeno'
     df_old_subset = df_old[key_cols + [old_k]].copy()
 
-    # proveď levý merge - zachováme pořadí a řádky z df_new
     try:
         merged = pd.merge(df_new, df_old_subset, on=key_cols, how="left", suffixes=("","_old"))
     except Exception:
-        # pokud merge selže (např. žádné společné sloupce), fallback k přímému přepsání
         if new_k is None:
             df_new["koupeno"] = False
         try:
@@ -88,20 +146,14 @@ def ensure_output_excel(data):
             pass
         return
 
-    # rozhodnutí o výsledném 'koupeno':
-    # - pokud existuje hodnota ze starého souboru (old_k), použijeme ji,
-    # - jinak použijeme hodnotu z new (pokud existuje),
-    # - jinak False.
     if old_k in merged.columns:
         merged['koupeno'] = merged[old_k]
     else:
         merged['koupeno'] = False
 
     if new_k is not None and new_k in merged.columns:
-        # tam, kde je koupeno z old prázdné/NA, vezmeme hodnotu z new
         merged['koupeno'] = merged['koupeno'].where(merged['koupeno'].notna(), merged[new_k])
 
-    # odstraníme pomocné sloupce old/new (kromě finálního 'koupeno')
     for c in [old_k, new_k]:
         if c and c in merged.columns and c != 'koupeno':
             try:
@@ -109,11 +161,9 @@ def ensure_output_excel(data):
             except Exception:
                 pass
 
-    # finální uložení
     try:
         merged.to_excel(OUTPUT_EXCEL, index=False)
     except Exception:
-        # jako poslední možnost ulož new s koupeno=False pokud chybí
         if 'koupeno' not in df_new.columns:
             df_new["koupeno"] = False
         try:
@@ -121,99 +171,194 @@ def ensure_output_excel(data):
         except Exception:
             pass
 
-def to_rows(data):
-    wanted = ["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka","koupeno"]
-    cols = [c for c in data.columns if c.strip().lower() in wanted]
+# ===================== Hlavní okno (větší, zarovnaná tlačítka) =====================
 
-    df = data[cols].astype(str)
-    rows = df.values.tolist()
-    ids = [f"{r[cols.index(c)] if c in cols else ''}" for r in rows for c in cols[:3]]
-    return rows, ids
+header_col = sg.Column(
+    [[sg.Text("FineGusto plánovač", font=('Any', 16, 'bold'))]],
+    element_justification='center', pad=(0, 10)
+)
+btn_row_col = sg.Column(
+    [[sg.Button("Spočítat", key="-RUN-", size=(18,2)),
+      sg.Button("Konec", size=(18,2))]],
+    element_justification='center', pad=(0, 0)
+)
+layout = [[header_col], [btn_row_col]]
+window = sg.Window("FineGusto", layout, finalize=True, size=(720, 280))
 
-# GUI layout
-layout = [
-    [sg.Text("FineGusto plánovač")],
-    [sg.Button("Spočítat", key="-RUN-"), sg.Button("Konec")],
-    [sg.Text("Debug:"), sg.Text("", key="-DBG-", size=(80,1))],
-]
+# ===================== Okno výsledků =====================
 
-window = sg.Window("FineGusto", layout, finalize=True)
+def _filter_unbought(d, col_k):
+    return d.loc[~d[col_k].astype(str).str.lower().isin(["true","1","yes","y","pravda"])].copy()
+
+def _build_table_layout(df_full, col_k, aggregate=False):
+    """
+    Vrací (rows_layout, buy_map).
+    - aggregate=False: po dnech (seřazeno vzestupně dle data, datum dd.mm.yyyy)
+    - aggregate=True : součet napříč daty; datum = AGG_DATE_PLACEHOLDER;
+                       klik na Koupeno označí všechny výskyty napříč daty
+    """
+    buy_map = {}
+
+    if not aggregate:
+        d = _filter_unbought(df_full, col_k)
+        if d.empty:
+            return None, buy_map
+
+        # řazení dle data
+        if "datum" in d.columns:
+            sort_vals = pd.to_datetime(d["datum"], errors="coerce")
+            d["_sort_datum"] = sort_vals
+            d = d.sort_values("_sort_datum", na_position="last", kind="mergesort").drop(columns=["_sort_datum"], errors="ignore")
+
+        # hlavička
+        rows = [[
+            sg.Text("Datum", size=(12,1), font=('Any', 10, 'bold')),
+            sg.Text("SK",    size=(6,1),  font=('Any', 10, 'bold')),
+            sg.Text("Reg.č.",size=(10,1), font=('Any', 10, 'bold')),
+            sg.Text("Název", size=(36,1), font=('Any', 10, 'bold')),
+            sg.Text("Množství", size=(12,1), font=('Any', 10, 'bold')),
+            sg.Text("", size=(8,1), font=('Any', 10, 'bold')),
+            sg.Text("Akce", size=(10,1), font=('Any', 10, 'bold')),
+        ]]
+
+        for i, r in d.iterrows():
+            row_key = f"-BUY-{i}-"
+            buy_map[row_key] = [i]
+            rows.append([
+                sg.Text(_fmt_cz_date(r.get("datum","")), size=(12,1), pad=CELL_PAD),
+                sg.Text(str(r.get("ingredience_sk","")),  size=(6,1),  pad=CELL_PAD),
+                sg.Text(str(r.get("ingredience_rc","")),  size=(10,1), pad=CELL_PAD),
+                sg.Text(str(r.get("nazev","")),           size=(36,1), pad=CELL_PAD),
+                sg.Text(str(r.get("potreba","")),         size=(12,1), pad=CELL_PAD),
+                sg.Text(str(r.get("jednotka","")),        size=(8,1),  pad=CELL_PAD),
+                sg.Button("Koupeno", key=row_key, size=(10,1), pad=BTN_PAD),
+            ])
+
+        return rows, buy_map
+
+    # aggregate=True
+    d = _filter_unbought(df_full, col_k)
+    if d.empty:
+        return None, buy_map
+
+    d["_num_pot"] = pd.to_numeric(d["potreba"], errors="coerce").fillna(0.0)
+    grp_cols = ["ingredience_sk", "ingredience_rc", "nazev", "jednotka"]
+    g = d.groupby(grp_cols, as_index=False).agg(potreba=("_num_pot", "sum"))
+    g = g.sort_values(["ingredience_sk","ingredience_rc","nazev","jednotka"], kind="mergesort")
+
+    # skupina -> indexy všech řádků v CELÉM df_full (napříč daty)
+    group_to_indices = {}
+    for idx, row in df_full.iterrows():
+        key = (str(row.get("ingredience_sk","")).strip(),
+               str(row.get("ingredience_rc","")).strip(),
+               str(row.get("nazev","")).strip(),
+               str(row.get("jednotka","")).strip())
+        group_to_indices.setdefault(key, []).append(idx)
+
+    rows = [[
+        sg.Text("Datum", size=(12,1), font=('Any', 10, 'bold')),
+        sg.Text("SK",    size=(6,1),  font=('Any', 10, 'bold')),
+        sg.Text("Reg.č.",size=(10,1), font=('Any', 10, 'bold')),
+        sg.Text("Název", size=(36,1), font=('Any', 10, 'bold')),
+        sg.Text("Množství", size=(12,1), font=('Any', 10, 'bold')),
+        sg.Text("", size=(8,1), font=('Any', 10, 'bold')),
+        sg.Text("Akce", size=(10,1), font=('Any', 10, 'bold')),
+    ]]
+
+    btn_id = 0
+    for _, r in g.iterrows():
+        sk = str(r.get("ingredience_sk","")).strip()
+        rc = str(r.get("ingredience_rc","")).strip()
+        nz = str(r.get("nazev","")).strip()
+        mj = str(r.get("jednotka","")).strip()
+        row_key = f"-BUY-G-{btn_id}-"
+        btn_id += 1
+        buy_map[row_key] = group_to_indices.get((sk, rc, nz, mj), [])
+
+        rows.append([
+            sg.Text(AGG_DATE_PLACEHOLDER,             size=(12,1), pad=CELL_PAD),
+            sg.Text(sk,                                size=(6,1),  pad=CELL_PAD),
+            sg.Text(rc,                                size=(10,1), pad=CELL_PAD),
+            sg.Text(nz,                                size=(36,1), pad=CELL_PAD),
+            sg.Text(str(r.get("potreba","")),          size=(12,1), pad=CELL_PAD),
+            sg.Text(mj,                                size=(8,1),  pad=CELL_PAD),
+            sg.Button("Koupeno", key=row_key, size=(10,1), pad=BTN_PAD),
+        ])
+    return rows, buy_map
+
+def _controls_row(agg_flag):
+    """Řádka ovládacích prvků – vytváří se vždy nově po přestavbě okna."""
+    return [
+        sg.Checkbox("Sčítat napříč daty", key="-AGG-", enable_events=True, default=bool(agg_flag), size=(22,1)),
+        sg.Button("Zavřít", key="-CLOSE-", size=(16,1))
+    ]
+
+def _create_results_window(df_full, col_k, agg_flag, location=None):
+    rows_layout, buy_map = _build_table_layout(df_full, col_k, aggregate=agg_flag)
+    if rows_layout is None:
+        return None, None
+
+    table_col = sg.Column(rows_layout, scrollable=True, size=(1000,560), key='-COL-')
+    controls = _controls_row(agg_flag)
+    controls_col = sg.Column([controls], element_justification='center', pad=(0,0))
+    lay = [[table_col],[controls_col]]
+
+    # ✅ jen když máme platnou dvojici (x, y), tak ji předáme
+    win_kwargs = dict(finalize=True, size=(1040, 640))
+    try:
+        if location is not None:
+            x, y = int(location[0]), int(location[1])
+            win_kwargs["location"] = (x, y)
+    except Exception:
+        pass
+
+    w = sg.Window("Výsledek", lay, **win_kwargs)
+    return w, buy_map
 
 def open_results():
-    """Otevře okno s výsledky a umožní označit položky jako koupené bez přeskakování okna."""
+    """Okno výsledků s přepínáním agregace (oběma směry) a unifikovanými tlačítky."""
     try:
-        df_full = pd.read_excel(OUTPUT_EXCEL, dtype=str).fillna("")
+        df_full = pd.read_excel(OUTPUT_EXCEL).fillna("")
         df_full.columns = df_full.columns.str.strip()
+        _to_date_col(df_full, "datum")
 
         col_k = _find_col(df_full, ["koupeno"])
         if col_k is None:
-            # pokud tam není, vytvoříme sloupec prázdný
             df_full["koupeno"] = ""
             col_k = "koupeno"
 
-        def build_rows_layout(df_full_local):
-            # vrátí layout (seznam řádků) pro Column podle aktuálního df_full_local
-            mask = ~df_full_local[col_k].astype(str).str.lower().isin(["true", "1", "yes", "y", "PRAVDA".lower()])
-            df_to_show_local = df_full_local.loc[mask]
-
-            if df_to_show_local.empty:
-                return None, df_to_show_local
-
-            # upravené záhlaví: odstraněno 'MJ', 'potreba' přejmenováno na 'Množství', odstraněn bool sloupec před tlačítkem
-            header = ["Datum", "SK", "Reg.č.", "Název", "Množství","", "Akce"]
-            # velikosti sloupců upraveny pro lepší zarovnání
-            rows_layout_local = [[
-                sg.Text(header[0], size=(12,1), font=('Any', 10, 'bold')),
-                sg.Text(header[1], size=(6,1), font=('Any', 10, 'bold')),
-                sg.Text(header[2], size=(10,1), font=('Any', 10, 'bold')),
-                sg.Text(header[3], size=(36,1), font=('Any', 10, 'bold')),
-                sg.Text(header[4], size=(12,1), font=('Any', 10, 'bold')),
-                sg.Text(header[5], size=(8,1), font=('Any', 10, 'bold')),
-                sg.Text(header[6], size=(8,1), font=('Any', 10, 'bold')),
-            ]]
-
-            for i, r in df_to_show_local.iterrows():
-                # pozor: používáme 'potreba' hodnotu, ale v hlavičce ji zobrazíme jako 'Množství'
-                row_elems = [
-                    sg.Text(str(r.get("datum","")), size=(12,1)),
-                    sg.Text(str(r.get("ingredience_sk","")), size=(6,1)),
-                    sg.Text(str(r.get("ingredience_rc","")), size=(10,1)),
-                    sg.Text(str(r.get("nazev","")), size=(36,1)),
-                    sg.Text(str(r.get("potreba","")), size=(12,1)),
-                    sg.Text(str(r.get("jednotka","")), size=(6,1)),
-                    sg.Button("Koupeno", key=f"-BUY-{i}-", size=(8,1))
-                ]
-                rows_layout_local.append(row_elems)
-
-            return rows_layout_local, df_to_show_local
-
-        rows_layout, df_to_show = build_rows_layout(df_full)
-
-        if rows_layout is None:
+        agg_flag = False
+        w, buy_map = _create_results_window(df_full, col_k, agg_flag)
+        if w is None:
             sg.popup("Žádné položky k zobrazení (vše koupeno nebo prázdné).")
             return
 
-        # Sloupec s klíčem, aby šel updateovat bez zavírání okna
-        col = sg.Column(rows_layout, scrollable=True, size=(950,520), key='-COL-')
-        lay = [[col],[sg.Button("Zavřít")]]
-        w = sg.Window("Výsledek", lay, finalize=True)
-
         while True:
             ev, vals = w.read()
-            window['-DBG-'].update(f"Ev: {repr(ev)}")
-            if ev in (sg.WINDOW_CLOSED, "Zavřít"):
+            if ev in (sg.WINDOW_CLOSED, "-CLOSE-"):
                 break
 
-            if isinstance(ev, str) and ev.startswith("-BUY-"):
-                try:
-                    idx = int(ev.split("-")[2])
-                except Exception:
-                    # pokud index není integer, ignorujeme
-                    sg.popup_error("Chybný index položky.")
-                    continue
+            if ev == "-AGG-":
+                agg_flag = bool(vals.get("-AGG-", False))
+                w, buy_map = _refresh_table_inplace(w, df_full, col_k, agg_flag)
+                if w is None:
+                    sg.popup("Žádné položky k zobrazení (vše koupeno nebo prázdné).")
+                    break
+                continue
 
-                # označíme v df_full položku jako koupenou a uložíme do excelu
-                df_full.at[idx, col_k] = True
+            if isinstance(ev, str) and ev.startswith("-BUY-"):
+                idx_list = buy_map.get(ev, [])
+                if not idx_list:
+                    try:
+                        idx = int(ev.split("-")[2])
+                        idx_list = [idx]
+                    except Exception:
+                        sg.popup_error("Chybný index položky.")
+                        continue
+
+                for idx in idx_list:
+                    df_full.at[idx, col_k] = True
+
                 try:
                     df_full.to_excel(OUTPUT_EXCEL, index=False)
                 except Exception as e:
@@ -221,43 +366,23 @@ def open_results():
                     sg.popup_error(f"Chyba při ukládání do Excelu: {e}\n\n{tb}")
                     continue
 
-                # překreslíme obsah Column bez zavírání okna
-                new_rows_layout, new_df_to_show = build_rows_layout(df_full)
-                if new_rows_layout is None:
+                # 👉 bez zavírání okna:
+                w, buy_map = _refresh_table_inplace(w, df_full, col_k, agg_flag)
+                if w is None:
                     sg.popup("Všechny položky jsou koupené. Okno bude zavřeno.")
                     break
-                try:
-                    # update layout - některé verze PySimpleGUI podporují update(layout=...)
-                    w['-COL-'].update(layout=new_rows_layout)
-                except Exception:
-                    # pokud update layout neprojde, pokusíme se alternativně zavřít a znovu otevřít okno na stejné pozici
-                    try:
-                        # pokus o získání pozice (pokud dostupné)
-                        try:
-                            pos = w.current_location()
-                        except Exception:
-                            pos = None
-                        w.close()
-                        col = sg.Column(new_rows_layout, scrollable=True, size=(950,520), key='-COL-')
-                        lay = [[col],[sg.Button("Zavřít")]]
-                        if pos:
-                            w = sg.Window("Výsledek", lay, finalize=True, location=pos)
-                        else:
-                            w = sg.Window("Výsledek", lay, finalize=True)
-                    except Exception as e2:
-                        tb = traceback.format_exc()
-                        sg.popup_error(f"Chyba při obnově okna výsledků: {e2}\n\n{tb}")
-                        break
+            continue
 
         w.close()
     except Exception as e:
         tb = traceback.format_exc()
         sg.popup_error(f"Chyba v results window:\n{e}\n\n{tb}")
 
+# ===================== Hlavní smyčka =====================
+
 while True:
     try:
         ev, vals = window.read()
-        window['-DBG-'].update(f"Ev: {repr(ev)}")
         if ev in (sg.WINDOW_CLOSED, "Konec"):
             break
         if ev == "-RUN-":
@@ -271,7 +396,6 @@ while True:
             open_results()
     except Exception as e:
         tb = traceback.format_exc()
-        print("EXC in main loop:", tb)
         sg.popup_error(f"Chyba v hlavním okně:\n{e}\n\n{tb}")
 
 window.close()
