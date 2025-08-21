@@ -5,15 +5,97 @@ import pandas as pd
 import PySimpleGUIQt as sg
 import main
 from datetime import date
+import math
 
 OUTPUT_EXCEL = Path("vysledek.xlsx")
 AGG_DATE_PLACEHOLDER = "XX-XX-XXXX"  # datum v agregovaném režimu
 # --- vizuální zarovnání buněk v řádku tabulky ---
 CELL_PAD = (0, 5)                 # pro všechny Text buňky
-BTN_PAD  = ((0, 0), (-5,5))      # pro Button – zvedne ho cca o 6 px (případně uprav na -4 / -8)
+BTN_PAD  = ((0, 0), (-5,5))       # pro Button – zvedne ho cca o 6 px (případně uprav na -4 / -8)
 
+# ===================== Normalizace na čistý bool (bez jazyků) =====================
+
+def _to_bool_cell_excel(x):
+    """
+    Převod libovolné hodnoty na bool bez jazykových slov:
+    - True/False z Excelu zůstává
+    - 1/0 (i číslem) -> True/False
+    - prázdno/None/NaN -> False
+    - jakýkoli jiný text -> False (nepřekládáme 'PRAVDA' apod.)
+    """
+    if x is None:
+        return False
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, float):
+        if math.isnan(x):
+            return False
+        return x != 0.0
+    if isinstance(x, int):
+        return x != 0
+    # stringy: zkusíme numeriku; jinak False
+    s = str(x).strip()
+    if s == "":
+        return False
+    try:
+        # povolíme i "1", "0" v textu
+        return float(s.replace(",", ".")) != 0.0
+    except Exception:
+        return False
+
+def _normalize_koupeno_column(df, prefer_name="koupeno"):
+    """
+    Zajistí existenci a bool obsah sloupce 'koupeno' (jméno ignoruje case/mezery).
+    Vrací skutečné jméno sloupce (case-preserved) po sjednocení.
+    """
+    real = None
+    cols = {c.strip().lower(): c for c in df.columns}
+    if prefer_name in ["koupeno"]:
+        real = cols.get("koupeno")
+    if real is None:
+        # sloupec chybí -> založíme
+        df["koupeno"] = False
+        real = "koupeno"
+
+    # převeď na čisté booly
+    df[real] = df[real].apply(_to_bool_cell_excel).astype(bool)
+    return real
 
 # ===================== Pomocné funkce =====================
+
+def _find_col(df, candidates):
+    cols = {c.strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in cols:
+            return cols[key]
+    return None
+
+def _to_date_col(df, col_name="datum"):
+    if col_name in df.columns:
+        df[col_name] = pd.to_datetime(df[col_name], errors="coerce").dt.date
+
+def _safe_loc(win):
+    """Bezpečně vrátí (x, y) pozici okna, nebo None."""
+    try:
+        x, y = win.current_location()
+        return int(x), int(y)
+    except Exception:
+        return None
+
+def _fmt_cz_date(v):
+    try:
+        if isinstance(v, date):
+            return f"{v:%d.%m.%Y}"
+    except Exception:
+        pass
+    try:
+        dt = pd.to_datetime(v, errors="coerce")
+        if pd.isna(dt):
+            return ""
+        return dt.strftime("%d.%m.%Y")
+    except Exception:
+        return str(v) if v is not None else ""
 
 def _refresh_table_inplace(w, df_full, col_k, agg_flag):
     """
@@ -48,43 +130,12 @@ def _refresh_table_inplace(w, df_full, col_k, agg_flag):
         w.close()
         w, buy_map = _create_results_window(df_full, col_k, agg_flag, location=loc)
         return w, buy_map
-    
-def _find_col(df, candidates):
-    cols = {c.strip().lower(): c for c in df.columns}
-    for cand in candidates:
-        key = cand.strip().lower()
-        if key in cols:
-            return cols[key]
-    return None
 
-def _to_date_col(df, col_name="datum"):
-    if col_name in df.columns:
-        df[col_name] = pd.to_datetime(df[col_name], errors="coerce").dt.date
-
-def _safe_loc(win):
-    """Bezpečně vrátí (x, y) pozici okna, nebo None."""
-    try:
-        x, y = win.current_location()
-        return int(x), int(y)
-    except Exception:
-        return None
-    
-def _fmt_cz_date(v):
-    try:
-        if isinstance(v, date):
-            return f"{v:%d.%m.%Y}"
-    except Exception:
-        pass
-    try:
-        dt = pd.to_datetime(v, errors="coerce")
-        if pd.isna(dt):
-            return ""
-        return dt.strftime("%d.%m.%Y")
-    except Exception:
-        return str(v) if v is not None else ""
+# ===================== Excel I/O + sjednocení =====================
 
 def ensure_output_excel(data):
-    """Zachová 'koupeno'; sjednotí datum na typ date (bez času)."""
+    """Zachová 'koupeno'; sjednotí datum a 'koupeno' na správné typy a zapíše jako bool."""
+    # ---- příjem nových dat ----
     if isinstance(data, pd.DataFrame):
         df_new = data.copy()
     else:
@@ -97,23 +148,33 @@ def ensure_output_excel(data):
     df_new.columns = df_new.columns.str.strip()
     _to_date_col(df_new, "datum")
 
+    # normalizovat 'koupeno' v nových datech
     new_k = _find_col(df_new, ["koupeno"])
+    if new_k is None:
+        df_new["koupeno"] = False
+        new_k = "koupeno"
+    df_new[new_k] = df_new[new_k].apply(_to_bool_cell_excel).astype(bool)
 
+    # ---- pokud neexistuje starý soubor ----
     if not OUTPUT_EXCEL.exists():
-        if new_k is None:
-            df_new["koupeno"] = False
         try:
+            if new_k != "koupeno":
+                df_new.rename(columns={new_k: "koupeno"}, inplace=True)
+            df_new["koupeno"] = df_new["koupeno"].apply(_to_bool_cell_excel).astype(bool)
             df_new.to_excel(OUTPUT_EXCEL, index=False)
         except Exception:
             pass
         return
 
+    # ---- načtení starého souboru ----
     try:
         df_old = pd.read_excel(OUTPUT_EXCEL)
     except Exception:
-        if new_k is None:
-            df_new["koupeno"] = False
+        # fallback: zapiš nové
         try:
+            if new_k != "koupeno":
+                df_new.rename(columns={new_k: "koupeno"}, inplace=True)
+            df_new["koupeno"] = df_new["koupeno"].apply(_to_bool_cell_excel).astype(bool)
             df_new.to_excel(OUTPUT_EXCEL, index=False)
         except Exception:
             pass
@@ -127,7 +188,9 @@ def ensure_output_excel(data):
     if old_k is None:
         df_old["koupeno"] = False
         old_k = "koupeno"
+    df_old[old_k] = df_old[old_k].apply(_to_bool_cell_excel).astype(bool)
 
+    # ---- sjednocení sloupců (kromě 'koupeno') ----
     key_cols = [c for c in df_new.columns if c.strip().lower() != "koupeno"]
     for c in key_cols:
         if c not in df_old.columns:
@@ -135,38 +198,49 @@ def ensure_output_excel(data):
 
     df_old_subset = df_old[key_cols + [old_k]].copy()
 
+    # ---- merge ----
     try:
-        merged = pd.merge(df_new, df_old_subset, on=key_cols, how="left", suffixes=("","_old"))
+        merged = pd.merge(df_new, df_old_subset, on=key_cols, how="left", suffixes=("", "_old"))
     except Exception:
-        if new_k is None:
-            df_new["koupeno"] = False
         try:
+            if new_k != "koupeno":
+                df_new.rename(columns={new_k: "koupeno"}, inplace=True)
+            df_new["koupeno"] = df_new["koupeno"].apply(_to_bool_cell_excel).astype(bool)
             df_new.to_excel(OUTPUT_EXCEL, index=False)
         except Exception:
             pass
         return
 
-    if old_k in merged.columns:
-        merged['koupeno'] = merged[old_k]
+    # ---- složení výsledného 'koupeno' ----
+    old_suff = f"{old_k}_old"  # typicky "koupeno_old"
+    if old_suff in merged.columns:
+        merged["koupeno"] = merged[old_suff]
+    elif old_k in merged.columns:
+        merged["koupeno"] = merged[old_k]
     else:
-        merged['koupeno'] = False
+        merged["koupeno"] = False
 
-    if new_k is not None and new_k in merged.columns:
-        merged['koupeno'] = merged['koupeno'].where(merged['koupeno'].notna(), merged[new_k])
+    if new_k in merged.columns:
+        # nová hodnota jen tam, kde ve staré nic nebylo (ale máme už pouze bool -> použijeme OR)
+        merged["koupeno"] = merged["koupeno"] | merged[new_k]
 
-    for c in [old_k, new_k]:
-        if c and c in merged.columns and c != 'koupeno':
+    # ---- normalizace a úklid ----
+    merged["koupeno"] = merged["koupeno"].apply(_to_bool_cell_excel).astype(bool)
+    for c in [old_suff, old_k, new_k]:
+        if c and c in merged.columns and c != "koupeno":
             try:
-                merged = merged.drop(columns=[c])
+                merged.drop(columns=[c], inplace=True)
             except Exception:
                 pass
 
+    # ---- zápis ----
     try:
         merged.to_excel(OUTPUT_EXCEL, index=False)
     except Exception:
-        if 'koupeno' not in df_new.columns:
-            df_new["koupeno"] = False
         try:
+            if new_k != "koupeno":
+                df_new.rename(columns={new_k: "koupeno"}, inplace=True)
+            df_new["koupeno"] = df_new["koupeno"].apply(_to_bool_cell_excel).astype(bool)
             df_new.to_excel(OUTPUT_EXCEL, index=False)
         except Exception:
             pass
@@ -188,7 +262,8 @@ window = sg.Window("FineGusto", layout, finalize=True, size=(720, 280))
 # ===================== Okno výsledků =====================
 
 def _filter_unbought(d, col_k):
-    return d.loc[~d[col_k].astype(str).str.lower().isin(["true","1","yes","y","pravda"])].copy()
+    # Sloupec je bool -> vyber jen NEkoupené
+    return d.loc[~d[col_k]].copy()
 
 def _build_table_layout(df_full, col_k, aggregate=False):
     """
@@ -324,8 +399,11 @@ def open_results():
 
         col_k = _find_col(df_full, ["koupeno"])
         if col_k is None:
-            df_full["koupeno"] = ""
+            df_full["koupeno"] = False
             col_k = "koupeno"
+
+        # sjednotit na bool (žádná jazyková slova se neřeší)
+        df_full[col_k] = df_full[col_k].apply(_to_bool_cell_excel).astype(bool)
 
         agg_flag = False
         w, buy_map = _create_results_window(df_full, col_k, agg_flag)
@@ -360,6 +438,8 @@ def open_results():
                     df_full.at[idx, col_k] = True
 
                 try:
+                    # uložit jako čisté booly -> v Excelu logické (zobrazí se PRAVDA/NEPRAVDA dle jazyka)
+                    df_full[col_k] = df_full[col_k].apply(_to_bool_cell_excel).astype(bool)
                     df_full.to_excel(OUTPUT_EXCEL, index=False)
                 except Exception as e:
                     tb = traceback.format_exc()
@@ -379,6 +459,18 @@ def open_results():
         sg.popup_error(f"Chyba v results window:\n{e}\n\n{tb}")
 
 # ===================== Hlavní smyčka =====================
+
+header_col = sg.Column(
+    [[sg.Text("FineGusto plánovač", font=('Any', 16, 'bold'))]],
+    element_justification='center', pad=(0, 10)
+)
+btn_row_col = sg.Column(
+    [[sg.Button("Spočítat", key="-RUN-", size=(18,2)),
+      sg.Button("Konec", size=(18,2))]],
+    element_justification='center', pad=(0, 0)
+)
+layout = [[header_col], [btn_row_col]]
+window = sg.Window("FineGusto", layout, finalize=True, size=(720, 280))
 
 while True:
     try:
