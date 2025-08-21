@@ -1,5 +1,5 @@
 # run.py
-from gui.main_window import start_app
+from gui.main_window import run
 
 if __name__ == "__main__":
-    start_app()
+    run()
