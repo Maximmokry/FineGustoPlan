@@ -1,58 +1,19 @@
+# main.py
 import pandas as pd
 from datetime import date
+from services.paths import RECEPTY_FILE, PLAN_FILE, OUTPUT_EXCEL
+from services.data_utils import to_date_col, find_col
 from pathlib import Path
 
-# Cesty k souborům 
-DATA_DIR = Path("data")
-RECEPTY_FILE = DATA_DIR / "recepty.xlsx" 
-PLAN_FILE = Path("plan.xlsx")
-OUTPUT_FILE = Path("vysledek.xlsx")
-
-# --- pomocné funkce ---
-def _to_date(s):
+def _to_date(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce").dt.date
 
-def _find_col(df, candidates):
-    """Najde skutečný název sloupce case-insensitive (stejné jako v GUI)."""
-    cols = {c.strip().lower(): c for c in df.columns}
-    for cand in candidates:
-        key = cand.strip().lower()
-        if key in cols:
-            return cols[key]
-    return None
-
-def _truthy(v):
-    """Robustně zkontroluje, jestli hodnota reprezentuje True."""
-    if pd.isna(v):
-        return False
-    if isinstance(v, bool):
-        return v
-    try:
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return bool(int(v))
-    except Exception:
-        pass
-    s = str(v).strip().lower()
-    return s in ("true", "1", "yes", "y", "t", "pravda")
-
-def _as_date(val):
-    """Převod hodnoty na date (pokud možno). Pokud ne, vrátí původní hodnotu jako string)."""
-    try:
-        return pd.to_datetime(val).date()
-    except Exception:
-        try:
-            if isinstance(val, date):
-                return val
-        except Exception:
-            pass
-        return str(val)
-
-# --- načtení dat ---
 def nacti_data():
+    # List sheetů, tvůj název má mezery – držíme se originálu
     recepty = pd.read_excel(RECEPTY_FILE, sheet_name="HEO - Kusovníkové vazby platné ")
     plan = pd.read_excel(PLAN_FILE)
     if "datum" in plan.columns:
-        plan["datum"] = _to_date(plan["datum"])   # ← jen den
+        plan["datum"] = _to_date(plan["datum"])   # jen datum
     return recepty, plan
 
 def rozloz_vyrobek(vyrobek_id, mnozstvi, recepty, navstiveno=None):
@@ -62,13 +23,12 @@ def rozloz_vyrobek(vyrobek_id, mnozstvi, recepty, navstiveno=None):
 
     if vyrobek_id in navstiveno:
         return []
-    
-    # vyrobek_sk_c = "SK-Reg.c" -> rozdělíme
+    navstiveno.add(vyrobek_id)
+
     vyrobek_sk, vyrobek_reg_c = vyrobek_id.split("-", 1)
     vyrobek_sk = int(vyrobek_sk)
     vyrobek_reg_c = int(vyrobek_reg_c)
 
-    # najdi všechny řádky, kde rodič = vyrobek
     podrecept = recepty[(recepty["Reg. č."] == vyrobek_reg_c) & (recepty["SK"] == vyrobek_sk)]
 
     if podrecept.empty:
@@ -103,112 +63,104 @@ def rozloz_vyrobek(vyrobek_id, mnozstvi, recepty, navstiveno=None):
 
     return vysledky
 
-def spocitej_potrebne_ingredience(recepty, plan): 
-    vysledky = [] 
-    for _, row in plan.iterrows(): 
+def spocitej_potrebne_ingredience(recepty, plan):
+    vysledky = []
+    for _, row in plan.iterrows():
         vyrobek_reg_c = str(row['reg.č'])
-        id = f"400-{vyrobek_reg_c}"
+        vyrobek_id = f"400-{vyrobek_reg_c}"
+        mnozstvi = row["mnozstvi"]
+        datum = row["datum"]
 
-        mnozstvi = row["mnozstvi"] 
-        datum = row["datum"] 
-        ingredience = rozloz_vyrobek(id, mnozstvi, recepty) 
+        ingredience = rozloz_vyrobek(vyrobek_id, mnozstvi, recepty)
         for ingr in ingredience:
-            vysledky.append({ 
-                "datum": datum, 
-                "vyrobek": id, 
-                "nazev": ingr["nazev"], 
-                "ingredience_rc": ingr["ingredience_rc"], 
-                "ingredience_sk": ingr["ingredience_sk"], 
-                "potreba": ingr["potreba"], 
-                "jednotka": ingr["jednotka"] 
-            }) 
-            
+            vysledky.append({
+                "datum": datum,
+                "vyrobek": vyrobek_id,
+                "nazev": ingr["nazev"],
+                "ingredience_rc": ingr["ingredience_rc"],
+                "ingredience_sk": ingr["ingredience_sk"],
+                "potreba": ingr["potreba"],
+                "jednotka": ingr["jednotka"]
+            })
+
     df = pd.DataFrame(vysledky)
-    df["datum"] = _to_date(df["datum"])               # ← jen den
+    to_date_col(df, "datum")
 
-    df = df.groupby(["datum", "ingredience_sk","ingredience_rc","nazev", "jednotka"], as_index=False)["potreba"].sum() 
-    cols = ["datum", "ingredience_sk","ingredience_rc", "nazev", "potreba", "jednotka"] 
-    df = df[cols] 
-    return df 
+    df = df.groupby(["datum","ingredience_sk","ingredience_rc","nazev","jednotka"], as_index=False)["potreba"].sum()
+    df = df[["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka"]]
+    return df
 
-def uloz_vysledek(df): 
-    df.to_excel(OUTPUT_FILE, index=False) 
-    print(f"✅ Výsledek uložen do: {OUTPUT_FILE}") 
-    
-def main():
-    recepty, plan = nacti_data() 
-    vysledek = spocitej_potrebne_ingredience(recepty, plan) 
+def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
+    """
+    Logika: pokud se součet 'potreba' pro (datum, sk, rc) oproti minulému výstupu ZVÝŠIL,
+    nastavíme koupeno=False. Jinak zachováme předchozí koupeno. Novou hodnotu True
+    automaticky NEpřidělujeme.
+    """
+    df_new = df_new.copy()
+    df_new["__sk"] = df_new["ingredience_sk"].astype(str).str.strip()
+    df_new["__rc"] = df_new["ingredience_rc"].astype(str).str.strip()
+    df_new["__qty"] = pd.to_numeric(df_new["potreba"], errors="coerce").fillna(0.0)
+    to_date_col(df_new, "datum")
 
-    # ---- NOVÁ LOGIKA OBNOVY KOLONKY 'koupeno' PODLE MNOŽSTVÍ ----
-    # vytvoříme dočasný numerický sloupec 'mnozstvi' pro porovnání
-    vysledek["mnozstvi"] = pd.to_numeric(vysledek["potreba"], errors="coerce").fillna(0)
+    if not OUTPUT_EXCEL.exists():
+        df_new["koupeno"] = False
+        return df_new.drop(columns=["__sk","__rc","__qty"])
 
-    vysledek["datum"] = _to_date(vysledek["datum"])   # ← jen den
+    try:
+        old = pd.read_excel(OUTPUT_EXCEL)
+    except Exception:
+        df_new["koupeno"] = False
+        return df_new.drop(columns=["__sk","__rc","__qty"])
 
-    vysledek["__sk"] = vysledek["ingredience_sk"].astype(str).str.strip()
-    vysledek["__rc"] = vysledek["ingredience_rc"].astype(str).str.strip()
+    old = old.copy()
+    old.columns = old.columns.str.strip()
+    to_date_col(old, "datum")
+    old["__sk"] = old["ingredience_sk"].astype(str).str.strip()
+    old["__rc"] = old["ingredience_rc"].astype(str).str.strip()
+    old_qty_col = find_col(old, ["mnozstvi", "potreba"])
+    old["__qty"] = pd.to_numeric(old[old_qty_col], errors="coerce").fillna(0.0) if old_qty_col else 0.0
 
-    if OUTPUT_FILE.exists():
-        try:
-            old = pd.read_excel(OUTPUT_FILE)
-            old.columns = old.columns.str.strip()
+    old_k = find_col(old, ["koupeno"])
+    if old_k is None:
+        old["koupeno"] = False
+        old_k = "koupeno"
+    old["__koupeno_bool"] = old[old_k].astype(bool)
 
-            # klíče v old
-            old["datum"] = _to_date(old["datum"])             # ← jen den
+    old_grp = (
+        old.groupby(["datum","__sk","__rc"], as_index=False)
+           .agg(prev_qty=("__qty","sum"), prev_koupeno=("__koupeno_bool","max"))
+    )
 
-            old["__sk"] = old["ingredience_sk"].astype(str).str.strip()
-            old["__rc"] = old["ingredience_rc"].astype(str).str.strip()
+    new_grp = (
+        df_new.groupby(["datum","__sk","__rc"], as_index=False)
+              .agg(new_qty=("__qty","sum"))
+    )
 
-            # zjištění názvu sloupce s množstvím v old (může být 'mnozstvi' nebo 'potreba')
-            old_qty_col = _find_col(old, ["mnozstvi", "potreba"])
-            if old_qty_col is None:
-                old["__qty"] = 0.0
-            else:
-                old["__qty"] = pd.to_numeric(old[old_qty_col], errors="coerce").fillna(0)
+    merged = new_grp.merge(old_grp, on=["datum","__sk","__rc"], how="left")
+    merged["prev_qty"] = merged["prev_qty"].fillna(0.0)
+    merged["prev_koupeno"] = merged["prev_koupeno"].fillna(False).astype(bool)
+    increased = merged["new_qty"] > merged["prev_qty"]
 
-            # koupeno v old → bool
-            old_k = _find_col(old, ["koupeno"])
-            if old_k is None:
-                old["koupeno"] = False
-                old_k = "koupeno"
-            old["__koupeno_bool"] = old[old_k].apply(_truthy)
+    # cílový stav 'koupeno' na úrovni klíče
+    merged["koupeno_key"] = (~increased) & merged["prev_koupeno"]
 
-            # agregace starých dat na úroveň klíče (součet množství + stav koupeno = any)
-            old_grp = (
-                old.groupby(["datum", "__sk", "__rc"], as_index=False)
-                .agg(
-                    prev_qty=("__qty", "sum"),             # součet předchozího množství
-                    prev_koupeno=("__koupeno_bool", "max") # True, pokud kdykoli dřív bylo koupeno
-                )
-            )
-            # Pozn.: triviální způsob jak mít čitelný kód bez hvězdiček v editoru
+    # Přenes hodnotu na řádky df_new
+    df_new = df_new.merge(
+        merged[["datum","__sk","__rc","koupeno_key"]],
+        on=["datum","__sk","__rc"],
+        how="left"
+    )
+    df_new["koupeno"] = df_new["koupeno_key"].fillna(False).astype(bool)
 
-            # merge nového výsledku s historii
-            merged = vysledek.merge(old_grp, on=["datum", "__sk", "__rc"], how="left")
+    return df_new.drop(columns=["__sk","__rc","__qty","koupeno_key"])
 
-            # NaN → defaulty
-            merged["prev_qty"] = merged["prev_qty"].fillna(0.0)
-            merged["prev_koupeno"] = merged["prev_koupeno"].fillna(False).astype(bool)
-
-            # Pokud se nové množství ZVÝŠILO oproti minule → koupeno=False
-            # Jinak nech původní hodnotu koupeno (NEpřiřazuj True automaticky)
-            increased = merged["mnozstvi"] > merged["prev_qty"]
-            merged["koupeno"] = (~increased) & merged["prev_koupeno"]
-
-            # uklid: zahoď pomocné sloupce a vrať do 'vysledek'
-            vysledek = merged.drop(columns=["prev_qty", "prev_koupeno"])
-        except Exception as e:
-            print("⚠️ Nelze načíst/porovnat starý výsledek, nastavím koupeno=False:", e)
-            vysledek["koupeno"] = False
-    else:
-        # žádný starý soubor → všechno nekoupené
-        vysledek["koupeno"] = False
-
-    # už nepotřebujeme dočasné klíče a 'mnozstvi'
-    vysledek = vysledek.drop(columns=["__sk", "__rc", "mnozstvi"])
-
-    uloz_vysledek(vysledek) 
+def compute_plan() -> pd.DataFrame:
+    """
+    Hlavní funkce: načte data, spočítá potřeby a zohlední historii
+    kvůli koloně 'koupeno' (pokud se množství zvýšilo, resetuje na False).
+    Nic nezapisuje – zápis/merge řeší excel_service.ensure_output_excel().
+    """
+    recepty, plan = nacti_data()
+    vysledek = spocitej_potrebne_ingredience(recepty, plan)
+    vysledek = _recalculate_koupeno_against_previous(vysledek)
     return vysledek
-    
-if __name__ == "__main__": 
-    main()
