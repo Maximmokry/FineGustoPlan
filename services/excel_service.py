@@ -1,149 +1,122 @@
 # services/excel_service.py
-from __future__ import annotations
+import math
 import pandas as pd
-from services.paths import OUTPUT_EXCEL
-from services.data_utils import to_date_col, find_col, to_bool_cell_excel, clean_columns
-
-# --- interní normalizace klíčů ------------------------------------------------
+from .paths import OUTPUT_EXCEL
+from .data_utils import to_date_col, find_col, to_bool_cell_excel
 
 def _safe_int(v):
     try:
-        # umí i "150.0", "150,0"
         return int(float(str(v).replace(",", ".")))
     except Exception:
         return None
 
-def _as_key_txt(v) -> str:
-    """Stabilní textová reprezentace klíčů (SK/RC/název/jednotka)."""
+def _key_txt(v) -> str:
     if v is None:
         return ""
     i = _safe_int(v)
     return str(i) if i is not None else str(v).strip()
 
-KEY_COLS_CANON = ["datum", "ingredience_sk", "ingredience_rc", "nazev", "jednotka"]
-
-def _normalize_key_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Zajistí stabilní typy klíčových sloupců pro merge:
-      - datum -> date (bez času)
-      - ostatní -> string pomocí _as_key_txt
-    Nechává ostatní sloupce na pokoji (např. 'potreba' zůstává číselná).
-    """
-    if df is None or df.empty:
-        return df
-    # jistota: názvy sloupců jako stringy bez okrajových mezer
-    clean_columns(df)
-
-    # datum na date
+def _normalize_keys_inplace(df: pd.DataFrame):
+    """Sjednotí klíčové sloupce na stabilní typy/obsah."""
     if "datum" in df.columns:
         to_date_col(df, "datum")
-
-    # SK/RC/NÁZEV/JEDNOTKA jako stabilní text
-    for c in ["ingredience_sk", "ingredience_rc", "nazev", "jednotka"]:
+    for c in ("ingredience_sk","ingredience_rc"):
         if c in df.columns:
-            df[c] = df[c].map(_as_key_txt).astype(str)
-    return df
-
-# --- hlavní funkce ------------------------------------------------------------
+            df[c] = df[c].map(_key_txt)  # jako text klíč
+    for c in ("nazev","jednotka"):
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
 
 def ensure_output_excel(data):
+    """Zpětná kompatibilita pro ingredience (bool sloupec 'koupeno')."""
+    ensure_output_excel_generic(
+        data=data,
+        output_path=OUTPUT_EXCEL,
+        bool_col="koupeno",
+    )
+
+def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
     """
-    Zapíše/aktualizuje OUTPUT_EXCEL tak, aby:
-      - existoval a měl sjednocený sloupec 'koupeno' jako bool,
-      - merge je robustní vůči typům (klíčové sloupce sjednoceny na text),
-      - když starý soubor chybí/prázdný → default 'koupeno' = False,
-      - pokud nová data obsahují 'koupeno', použijí se (po normalizaci na bool).
+    Obecný zápis výsledku:
+      - drží (a normalizuje) bool sloupec `bool_col`
+      - merge se starým souborem, aby zůstaly zachované stavy
+      - unifikuje klíče (datum, ingredience_sk/rc, nazev, jednotka) → bez dtype konfliktů
     """
-    # ---- NOVÁ DATA -----------------------------------------------------------
+    # --- příjem nových dat ---
     if isinstance(data, pd.DataFrame):
         df_new = data.copy()
     else:
         df_new = pd.DataFrame(data)
 
     df_new = df_new.fillna("")
-    clean_columns(df_new)
-    to_date_col(df_new, "datum")
+    df_new.columns = [str(c).strip() for c in df_new.columns]
+    _normalize_keys_inplace(df_new)
 
-    # normalizace koupeno v nových datech (pokud existuje)
-    new_k = find_col(df_new, ["koupeno"])
-    new_has_koupeno = new_k is not None
-    if not new_has_koupeno:
-        df_new["koupeno"] = False
-        new_k = "koupeno"
-    else:
-        df_new[new_k] = df_new[new_k].apply(to_bool_cell_excel).astype(bool)
+    # normalizace bool sloupce v nových datech
+    new_k = find_col(df_new, [bool_col]) or bool_col
+    if new_k not in df_new.columns:
+        df_new[new_k] = False
+    df_new[new_k] = df_new[new_k].map(to_bool_cell_excel).astype(bool)
 
-    # sjednotit KLÍČE na stabilní text
-    df_new = _normalize_key_columns(df_new)
-
-    # ---- STARÝ SOUBOR -------------------------------------------------------
+    # --- když neexistuje starý soubor → rovnou zapiš (po přejmenování sloupce) ---
     try:
-        df_old = pd.read_excel(OUTPUT_EXCEL)
+        df_old = pd.read_excel(output_path)
+        has_old = True
     except Exception:
-        df_old = None
+        has_old = False
 
-    if df_old is None or df_old.empty or len(df_old.columns) == 0:
-        # první zápis – vždy 'koupeno' z nových (po normalizaci) nebo default False
-        out = df_new.copy()
-        if new_k != "koupeno":
-            out.rename(columns={new_k: "koupeno"}, inplace=True)
-        out["koupeno"] = out["koupeno"].apply(to_bool_cell_excel).astype(bool)
-        out.to_excel(OUTPUT_EXCEL, index=False)
+    if not has_old:
+        if new_k != bool_col:
+            df_new = df_new.rename(columns={new_k: bool_col})
+        df_new[bool_col] = df_new[bool_col].map(to_bool_cell_excel).astype(bool)
+        # final normalizace klíčů na odolné typy:
+        _normalize_keys_inplace(df_new)
+        df_new.to_excel(output_path, index=False)
         return
 
-    # máme starý soubor: připravíme ho
+    # --- máme stará data → merge ---
     df_old = df_old.fillna("")
-    clean_columns(df_old)
-    to_date_col(df_old, "datum")
+    df_old.columns = [str(c).strip() for c in df_old.columns]
+    _normalize_keys_inplace(df_old)
 
-    # zajistit koupeno ve starém
-    old_k = find_col(df_old, ["koupeno"])
-    if old_k is None:
-        df_old["koupeno"] = False
-        old_k = "koupeno"
-    df_old[old_k] = df_old[old_k].apply(to_bool_cell_excel).astype(bool)
+    old_k = find_col(df_old, [bool_col]) or bool_col
+    if old_k not in df_old.columns:
+        df_old[old_k] = False
+    df_old[old_k] = df_old[old_k].map(to_bool_cell_excel).astype(bool)
 
-    # sjednotit KLÍČE na stabilní text (stejně jako v df_new)
-    df_old = _normalize_key_columns(df_old)
+    # KLÍČE: všechny kromě bool sloupce
+    key_cols = [c for c in df_new.columns if c.strip().lower() != bool_col.lower()]
 
-    # ---- MERGE ---------------------------------------------------------------
-    # klíče = všechny sloupce kromě 'koupeno' a ne-mergeové numeriky typu 'potreba'
-    key_cols = [c for c in df_new.columns if c.lower() != "koupeno"]
-    # zároveň se pojistíme, aby merge nebral kvantitativní sloupce – zůstávají jen identifikační
-    # (držme se pouze kanonických klíčů, které reálně existují v df_new)
-    canon = [c for c in KEY_COLS_CANON if c in df_new.columns]
-    if canon:  # preferujeme kanon
-        key_cols = canon
-
-    # jistota: všechny klíče v df_old musí existovat, případně je doplníme prázdným stringem
+    # Doplň do df_old chybějící sloupce (kvůli merži)
     for c in key_cols:
         if c not in df_old.columns:
-            df_old[c] = "" if c != "datum" else pd.NaT
+            df_old[c] = ""
+
+    # stará podmnožina: klíče + starý bool
     df_old_subset = df_old[key_cols + [old_k]].copy()
 
-    # merge – teď už jsou typy klíčů sjednocené (string/date), nemá to padat
+    # merge bez dtype konfliktů (už jsou všechny klíče string/normalized)
     merged = pd.merge(df_new, df_old_subset, on=key_cols, how="left", suffixes=("", "_old"))
 
-    # zvol 'koupeno'
+    # složení výsledného bool sloupce
     old_suff = f"{old_k}_old"
-    if new_has_koupeno and (new_k in merged.columns):
-        merged["koupeno"] = merged[new_k].astype(bool)
+    if old_suff in merged.columns:
+        merged[bool_col] = merged[old_suff]
+    elif old_k in merged.columns:
+        merged[bool_col] = merged[old_k]
     else:
-        if old_suff in merged.columns:
-            merged["koupeno"] = merged[old_suff].astype(bool)
-        elif old_k in merged.columns:
-            merged["koupeno"] = merged[old_k].astype(bool)
-        else:
-            merged["koupeno"] = False
+        merged[bool_col] = False
 
-    merged["koupeno"] = merged["koupeno"].apply(to_bool_cell_excel).astype(bool)
+    # případný bool z nových dat (jen OR – ponechá True)
+    if new_k in merged.columns:
+        merged[bool_col] = merged[bool_col] | merged[new_k]
 
-    # úklid
+    merged[bool_col] = merged[bool_col].map(to_bool_cell_excel).astype(bool)
+
+    # úklid pomocných sloupců
     for c in [old_suff, old_k, new_k]:
-        if c and c in merged.columns and c != "koupeno":
-            try:
-                merged.drop(columns=[c], inplace=True)
-            except Exception:
-                pass
+        if c in merged.columns and c != bool_col:
+            merged.drop(columns=[c], inplace=True)
 
-    merged.to_excel(OUTPUT_EXCEL, index=False)
+    _normalize_keys_inplace(merged)
+    merged.to_excel(output_path, index=False)

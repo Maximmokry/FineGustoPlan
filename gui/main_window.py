@@ -1,20 +1,15 @@
 # gui/main_window.py
 import sys
 import traceback
-from datetime import date
-
-import pandas as pd
 import PySimpleGUIQt as sg
 
-import main as core  # compute_plan()
+import main as core  # compute_plan(), compute_plan_semifinished()
 from services.excel_service import ensure_output_excel
 from gui.results_window import open_results
+from gui.results_semis_window import open_semis_results
 
-
-APP_TITLE = "FineGusto"
-WINDOW_SIZE = (720, 280)
-CELL_PAD = (0, 5)
-BTN_PAD  = ((0, 0), (-5,5))
+APP_TITLE   = "FineGusto"
+WINDOW_SIZE = (760, 280)
 
 
 # -------------------- Jednotné hlášení chyb: konzole + popup --------------------
@@ -43,7 +38,7 @@ def _report_error(user_msg: str, exc: Exception | None = None):
 
 def _setup_global_exception_hook():
     """
-    Zajistí, že i neodchycené výjimky skončí v terminálu.
+    Zajistí, že i neodchycené výjimky skončí v terminálu a zároveň se ukážou v popupu.
     """
     def _hook(exctype, value, tb):
         try:
@@ -51,7 +46,6 @@ def _setup_global_exception_hook():
             traceback.print_exception(exctype, value, tb, file=sys.stderr)
         except Exception:
             pass
-        # u GUI nechceme zabíjet proces bez popupu – zkusíme zobrazit
         try:
             msg = "".join(traceback.format_exception(exctype, value, tb))
             sg.popup_error("Neodchycená výjimka!", msg)
@@ -68,8 +62,11 @@ def _build_main_window():
         element_justification='center', pad=(0, 10)
     )
     btn_row_col = sg.Column(
-        [[sg.Button("Spočítat", key="-RUN-", size=(18,2)),
-          sg.Button("Konec", key="-EXIT-", size=(18,2))]],
+        [[
+            sg.Button("nákup ingrediencí", key="-RUN-ING-", size=(22, 2)),
+            sg.Button("plán polotovarů",   key="-RUN-SEMI-", size=(22, 2)),
+            sg.Button("Konec",             key="-EXIT-", size=(14, 2)),
+        ]],
         element_justification='center', pad=(0, 0)
     )
     layout = [[header_col], [btn_row_col]]
@@ -93,20 +90,23 @@ def run():
             if ev in (sg.WINDOW_CLOSED, "-EXIT-", "Konec"):
                 break
 
-            if ev == "-RUN-":
+            # --- nákup ingrediencí ---
+            if ev == "-RUN-ING-":
                 try:
-                    # 1) Přepočet plánu (robustní main.compute_plan)
-                    df = core.compute_plan()
-
-                    # 2) Zápis/merge do výsledného Excelu (sjednocení 'koupeno' jako bool)
-                    ensure_output_excel(df)
-
-                    # 3) Otevřít okno s výsledky
-                    open_results()
-
+                    df = core.compute_plan()   # výpočet ingrediencí
+                    ensure_output_excel(df)    # zápis/merge do vysledek.xlsx (sloupec 'koupeno')
+                    open_results()             # okno s nákupním seznamem
                 except Exception as e:
-                    # Sem spadne i KeyError: 'ingredience_sk' a uvidíš ho v terminálu.
-                    _report_error("Chyba ve výpočtu (Spočítat)", e)
+                    _report_error("Chyba ve výpočtu (nákup ingrediencí)", e)
+                    continue
+
+            # --- plán polotovarů ---
+            if ev == "-RUN-SEMI-":
+                try:
+                    core.compute_plan_semifinished()  # zapisuje do polotovary.xlsx (sloupec 'vyrobeno')
+                    open_semis_results()              # okno s plánem polotovarů
+                except Exception as e:
+                    _report_error("Chyba ve výpočtu (plán polotovarů)", e)
                     continue
 
     finally:
