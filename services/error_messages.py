@@ -12,14 +12,14 @@ MSG = {
     "unhandled_exception": "Došlo k neočekávané chybě.\nAplikaci doporučujeme restartovat. Pokud problém přetrvává, obraťte se na podporu.",
 
     # --- Výsledky ingrediencí ---
-    "results_empty":       "Výsledný soubor s ingrediencemi je prázdný – není co zobrazit.\nUjistěte se, že máte vyplněný plán i receptury.",
+    "results_empty":       "V plánu nejsou žádné položky – není co zobrazit.\nUjistěte se, že máte vyplněný plán i receptury.",
     "results_all_bought":  "Všechny ingredience jsou již označené jako koupené.",
     "results_all_bought_close": "Všechny ingredience jsou již koupené. Okno bude nyní zavřeno.",
     "results_index_map":   "Chybné mapování položky v seznamu.\nZkuste změnit režim zobrazení (agregace/detaily) a poté akci zopakovat.",
     "results_save":        "Nepodařilo se uložit změny do souboru Excel.\nMožná je soubor otevřený v jiné aplikaci. Zavřete ho a zkuste akci znovu.",
 
     # --- Výsledky polotovarů ---
-    "semis_empty":         "Výsledný soubor polotovarů je prázdný – není co zobrazit.\nZkontrolujte plán a receptury, zda obsahují polotovary.",
+    "semis_empty":         "V plánu nejsou žádné položky – není co zobrazit.\nZkontrolujte plán a receptury, zda obsahují polotovary.",
     "semis_all_done":      "Všechny polotovary jsou již označeny jako vyrobené.",
     "semis_all_done_close": "Všechny polotovary jsou již vyrobené. Okno bude nyní zavřeno.",
     "semis_index_map":     "Chyba mapování řádku.\nZkuste přepnout zobrazení detailů a poté zpět.",
