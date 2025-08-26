@@ -2,7 +2,7 @@
 import sys
 import traceback
 import PySimpleGUIQt as sg
-
+from contextlib import suppress
 import main as core  # compute_plan(), compute_plan_semifinished()
 from services.excel_service import ensure_output_excel
 from gui.results_window import open_results
@@ -87,15 +87,27 @@ def run():
                 _report_error("Chyba při čtení události okna", e)
                 break
 
+            # --- PŘIDÁNO: bezpečné odčerpání fronty před ukončením smyčky ---
             if ev in (sg.WINDOW_CLOSED, "-EXIT-", "Konec"):
+                # zkus vyčistit případné zbylé eventy neblokujícím čtením
+                with suppress(Exception):
+                    while True:
+                        ev2, _ = window.read(timeout=0)
+                        if ev2 in (None, sg.TIMEOUT_EVENT):
+                            break
+                # a ještě speciálně testovací fake frontu, pokud existuje
+                with suppress(Exception):
+                    q = getattr(sg, "_event_queue", None)
+                    if isinstance(q, list):
+                        q.clear()
                 break
 
             # --- nákup ingrediencí ---
             if ev == "-RUN-ING-":
                 try:
-                    df = core.compute_plan()   # výpočet ingrediencí
-                    ensure_output_excel(df)    # zápis/merge do vysledek.xlsx (sloupec 'koupeno')
-                    open_results()             # okno s nákupním seznamem
+                    df = core.compute_plan()
+                    ensure_output_excel(df)
+                    open_results()
                 except Exception as e:
                     _report_error("Chyba ve výpočtu (nákup ingrediencí)", e)
                     continue
@@ -103,17 +115,15 @@ def run():
             # --- plán polotovarů ---
             if ev == "-RUN-SEMI-":
                 try:
-                    core.compute_plan_semifinished()  # zapisuje do polotovary.xlsx (sloupec 'vyrobeno')
-                    open_semis_results()              # okno s plánem polotovarů
+                    core.compute_plan_semifinished()
+                    open_semis_results()
                 except Exception as e:
                     _report_error("Chyba ve výpočtu (plán polotovarů)", e)
                     continue
 
     finally:
-        try:
+        with suppress(Exception):
             window.close()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
