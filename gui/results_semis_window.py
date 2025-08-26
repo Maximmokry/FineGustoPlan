@@ -16,6 +16,7 @@ from services.gui_helpers import (
     recreate_window_preserving,
     dbg_set_enabled,
 )
+from services import error_messages as ERR  # <- centralizované hlášky
 
 # ========================= VZHLED / ROZMĚRY =========================
 dbg_set_enabled(False)  # zap/vyp debug v gui_helpers
@@ -132,7 +133,7 @@ def _load_details_sheet() -> Optional[pd.DataFrame]:
         return det
     except Exception:
         return None
-    
+
 def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
     """
     1) 'Ping' plain zápis pro test UC5 (odposlech to_excel(path,...)).
@@ -148,8 +149,8 @@ def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
     # 1) Plain zápis (pro zachycení v testu UC5)
     try:
         df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)
-    except Exception:
-        pass  # i kdyby to selhalo, zkusíme ještě korektní zápis níže
+    except Exception as e:
+        ERR.show_error(ERR.MSG["semis_save"], e)  # zaloguj, pokračuj na korektní zápis
 
     # 2) Korektní zápis s pojmenovanými sheety
     try:
@@ -157,15 +158,16 @@ def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
             df_main.to_excel(writer, sheet_name="Prehled", index=False)
             (df_det if (df_det is not None and not df_det.empty) else empty_details) \
                 .to_excel(writer, sheet_name="Detaily", index=False)
-    except Exception:
+    except Exception as e:
         # poslední fallback – stále se jmény sheetů
         try:
             with pd.ExcelWriter(OUTPUT_SEMI_EXCEL, engine="openpyxl") as writer:
                 df_main.to_excel(writer, sheet_name="Prehled", index=False)
                 (df_det if (df_det is not None and not df_det.empty) else empty_details) \
                     .to_excel(writer, sheet_name="Detaily", index=False)
-        except Exception:
-            pass
+        except Exception as e2:
+            ERR.show_error(ERR.MSG["semis_save"], e2)
+
 
 # ========================= AGREGACE: Týden =========================
 def _week_range_label(ts: pd.Timestamp) -> str:
@@ -212,9 +214,7 @@ def _aggregate_weekly(df_main: pd.DataFrame, col_k: str) -> pd.DataFrame:
         # nic agregovat, vrať prázdno se správnými sloupci
         return pd.DataFrame(columns=["_week_start","datum","polotovar_sk","polotovar_rc","polotovar_nazev","jednotka","potreba"])
 
-    # týden začínající pondělím
-    # Pozn.: Period("W-MON") je v pohodě, ale pro jistotu spočítáme start i manuálně
-    #        – budou identické; manuální start se hodí pro čitelnost.
+    # týden začínající pondělím (stejná logika jako níže v d_src)
     d["_week_start"] = (d["_dt"] - pd.to_timedelta(d["_dt"].dt.weekday, unit="D")).dt.normalize()
 
     grp_cols = ["_week_start", "polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]
@@ -257,7 +257,7 @@ def _build_rows(
             d_src[c] = d_src[c].fillna("").astype(str).str.strip()
         to_date_col(d_src, "datum")
         d_src["_dt"] = pd.to_datetime(d_src["datum"], errors="coerce")
-         # Použij úplně stejný výpočet jako v _aggregate_weekly(), ať je porovnání 1:1
+        # stejný výpočet startu týdne jako v _aggregate_weekly
         d_src["_week_start"] = (d_src["_dt"] - pd.to_timedelta(d_src["_dt"].dt.weekday, unit="D")).dt.normalize()
 
         d = _aggregate_weekly(df_main, col_k)
@@ -300,7 +300,19 @@ def _build_rows(
             )
             rows.append([*main_row])
 
-            # ... (detaily beze změny)
+            # ----- detaily všech zdrojových řádků v této weekly skupině -----
+            if show_details and idx_list:
+                d_src_sel = d_src.loc[idx_list].copy()
+                d_src_sel["_dt_sort"] = pd.to_datetime(d_src_sel["datum"], errors="coerce")
+                d_src_sel = d_src_sel.sort_values("_dt_sort", kind="mergesort")
+                for _, rr in d_src_sel.iterrows():
+                    key_det = (
+                        str(rr.get("polotovar_sk", "")),
+                        str(rr.get("polotovar_rc", "")),
+                        rr.get("datum", "")
+                    )
+                    for det in df_details_map.get(key_det, []):
+                        rows.append([*_row_detail(det)])
 
             buy_map[row_key] = idx_list
             rowkey_map[row_key] = row_key
@@ -439,7 +451,7 @@ def open_semis_results():
                 df_main[canon] = ""
 
         if df_main.empty:
-            sg.popup("Výsledný soubor polotovarů je prázdný – není co zobrazit.")
+            sg.popup(ERR.MSG["semis_empty"])
             return
 
         # sloupec 'vyrobeno' (bool)
@@ -477,7 +489,7 @@ def open_semis_results():
             df_main, detail_map, col_k, show_details, weekly_sum, location=LAST_WIN_POS
         )
         if w is None:
-            sg.popup("Vše je již vyrobeno (nebo není co zobrazit).")
+            sg.popup(ERR.MSG["semis_all_done"])
             return
         _remember_pos(w)
 
@@ -489,16 +501,10 @@ def open_semis_results():
 
             # Toggle detailů (idempotentně)
             if ev == "-DETAILS-":
-                # 1) Přečti hodnotu, pokud ji Qt dodá; jinak invertuj (pro testy / headless)
-                if isinstance(vals.get("-DETAILS-"), bool):
-                    target = bool(vals["-DETAILS-"])
-                else:
-                    target = not show_details
-
-                # 2) Když už jsme na cílové hodnotě, nic nedělej (zabrání ping-pongu)
+                # čti z vals, fallback invert pro headless
+                target = bool(vals["-DETAILS-"]) if isinstance(vals.get("-DETAILS-"), bool) else not show_details
                 if target == show_details:
                     continue
-
                 show_details = target
                 builder = _builder_factory(
                     df_main, detail_map if df_det is not None and not df_det.empty else {},
@@ -506,21 +512,16 @@ def open_semis_results():
                 )
                 res = recreate_window_preserving(w, builder, col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup("Vše je již vyrobeno (nebo není co zobrazit).")
+                    sg.popup(ERR.MSG["semis_all_done"])
                     break
                 w, buy_map, rowkey_map = res
                 continue
 
             # Přepínač weekly režimu (idempotentně)
             if ev == "-WEEKLY-":
-                if isinstance(vals.get("-WEEKLY-"), bool):
-                    target = bool(vals["-WEEKLY-"])
-                else:
-                    target = not weekly_sum
-
+                target = bool(vals["-WEEKLY-"]) if isinstance(vals.get("-WEEKLY-"), bool) else not weekly_sum
                 if target == weekly_sum:
-                    continue  # žádná změna -> žádná rekreace -> žádný ping-pong
-
+                    continue
                 weekly_sum = target
                 builder = _builder_factory(
                     df_main, detail_map if df_det is not None and not df_det.empty else {},
@@ -528,7 +529,7 @@ def open_semis_results():
                 )
                 res = recreate_window_preserving(w, builder, col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup("Vše je již vyrobeno (nebo není co zobrazit).")
+                    sg.popup(ERR.MSG["semis_all_done"])
                     break
                 w, buy_map, rowkey_map = res
                 continue
@@ -537,7 +538,7 @@ def open_semis_results():
             if isinstance(ev, str) and ev.startswith("-SEMI-") and not weekly_sum:
                 idx_list = buy_map.get(ev, [])
                 if not idx_list:
-                    sg.popup_error("Chyba mapování řádku – zkus přepnout detail a zpět.")
+                    ERR.show_error(ERR.MSG["semis_index_map"])
                     continue
 
                 df_main.loc[idx_list, col_k] = True
@@ -545,7 +546,7 @@ def open_semis_results():
                     _force_bool(df_main, col_k)
                     _save_semi_excel(df_main, df_det)
                 except Exception as e:
-                    sg.popup_error(f"Chyba při ukládání do Excelu: {e}")
+                    ERR.show_error(ERR.MSG["semis_save"], e)
                     continue
 
                 builder = _builder_factory(
@@ -554,7 +555,7 @@ def open_semis_results():
                 )
                 res = recreate_window_preserving(w, builder, col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup("Vše je již vyrobeno. Okno bude zavřeno.")
+                    sg.popup(ERR.MSG["semis_all_done_close"])
                     break
                 w, buy_map, rowkey_map = res
 
@@ -562,7 +563,7 @@ def open_semis_results():
             if isinstance(ev, str) and ev.startswith("-WSEMI-") and weekly_sum:
                 idx_list = buy_map.get(ev, [])
                 if not idx_list:
-                    sg.popup_error("Pro tento týdenní součet nejsou nalezeny zdrojové řádky.")
+                    ERR.show_error(ERR.MSG["semis_weekly_no_src"])
                     continue
 
                 df_main.loc[idx_list, col_k] = True
@@ -570,7 +571,7 @@ def open_semis_results():
                     _force_bool(df_main, col_k)
                     _save_semi_excel(df_main, df_det)
                 except Exception as e:
-                    sg.popup_error(f"Chyba při ukládání do Excelu (weekly): {e}")
+                    ERR.show_error(ERR.MSG["semis_save_weekly"], e)
                     continue
 
                 builder = _builder_factory(
@@ -579,7 +580,7 @@ def open_semis_results():
                 )
                 res = recreate_window_preserving(w, builder, col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup("Vše je již vyrobeno. Okno bude zavřeno.")
+                    sg.popup(ERR.MSG["semis_all_done_close"])
                     break
                 w, buy_map, rowkey_map = res
 
@@ -590,6 +591,5 @@ def open_semis_results():
             pass
 
     except Exception as e:
-        tb = traceback.format_exc()
-        sg.popup_error(f"Chyba v okně polotovarů:\n{e}\n\n{tb}")
-        print(f"[ERROR] Chyba v okně polotovarů: {e}\n{tb}", flush=True)
+        # jednotné chování: log + přívětivá hláška
+        ERR.show_error(ERR.MSG["semis_window"], e)

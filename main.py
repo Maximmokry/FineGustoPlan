@@ -1,29 +1,70 @@
-
 # main.py
 from __future__ import annotations
 import pandas as pd
 import math
 from datetime import date
 from pathlib import Path
+
 from services.excel_service import ensure_output_excel_generic
 from services.paths import RECEPTY_FILE, PLAN_FILE, OUTPUT_EXCEL, OUTPUT_SEMI_EXCEL
 from services.data_utils import (
     to_date_col,
-    find_col,
     clean_columns,
-    to_bool_cell_excel
+    to_bool_cell_excel,
 )
 from services.semi_excel_service import ensure_output_semis_excel
 
 
+# ---------------------------- Tolerantní hledání sloupců ----------------------------
+
+def _normalize_col_key(s: str) -> str:
+    """Normalizace klíče: lower + odstranění mezer/teček/podtržítek/pomlček + odstraň CZ diakritiku."""
+    x = str(s or "").strip().lower()
+    repl = {
+        "á": "a", "č": "c", "ď": "d", "é": "e", "ě": "e", "í": "i", "ň": "n",
+        "ó": "o", "ř": "r", "š": "s", "ť": "t", "ú": "u", "ů": "u", "ý": "y", "ž": "z",
+    }
+    x = "".join(repl.get(ch, ch) for ch in x)
+    for ch in (" ", ".", "_", "-", "\u00A0"):  # vč. pevné mezery
+        x = x.replace(ch, "")
+    return x
+
+
+def find_col_loose(df: pd.DataFrame, candidates) -> str | None:
+    """
+    Tolerantní hledání názvu sloupce:
+    - ignoruje velikost písmen, mezery, tečky, podtržítka, pomlčky
+    - odstraňuje CZ diakritiku (č->c, ř->r, …)
+    - funguje i když kandidát má tečku na konci nebo ne (reg.c vs reg.c.)
+    Vrací PŮVODNÍ název sloupce z df.columns, nebo None.
+    """
+    norm_map = {}
+    for c in df.columns:
+        norm_map[_normalize_col_key(c)] = c
+
+    def _variants(cand: str):
+        base = str(cand or "")
+        yield base
+        if base.endswith("."):
+            yield base[:-1]      # bez poslední tečky
+        else:
+            yield base + "."     # s tečkou navíc
+        yield base.replace(".", "")  # bez všech teček
+
+    for cand in candidates or []:
+        for v in _variants(cand):
+            k = _normalize_col_key(v)
+            if k in norm_map:
+                return norm_map[k]
+    return None
+
+
+# Překryjeme lokálně find_col tak, aby veškerý kód níže automaticky používal tolerantní vyhledávání.
+def find_col(df: pd.DataFrame, candidates):
+    return find_col_loose(df, candidates)
+
 
 # ---------------------------- Pomocné safe převody ----------------------------
-
-def _as_key_txt(v):
-    if v is None:
-        return ""
-    i = _safe_int(v)
-    return str(i) if i is not None else str(v).strip()
 
 def _safe_float(v):
     try:
@@ -45,6 +86,7 @@ def _safe_float(v):
         except Exception:
             return None
 
+
 def _safe_int(v):
     """Bezpečný převod na int: 150 -> 150, 150.0 -> 150, '150' -> 150, NaN/''/None -> None."""
     f = _safe_float(v)
@@ -52,15 +94,29 @@ def _safe_int(v):
         return None
     return int(f)
 
+
+def _as_key_txt(v):
+    """Stabilní textová reprezentace čísla/klíče (pro SK/RC apod.)."""
+    if v is None:
+        return ""
+    i = _safe_int(v)
+    return str(i) if i is not None else str(v).strip()
+
+
+def _key_txt(v) -> str:
+    """Stabilní textový klíč: 150 i 150.0 -> '150'; None -> ''."""
+    if v is None:
+        return ""
+    i = _safe_int(v)
+    return str(i) if i is not None else str(v).strip()
+
+
 def _series_or_blank(df: pd.DataFrame, col: str) -> pd.Series:
     """Vrať df[col], pokud existuje; jinak prázdnou Series se stejným indexem."""
     return df[col] if col in df.columns else pd.Series([""] * len(df), index=df.index)
 
 
-
 # ---------------------------- Načtení a normalizace ----------------------------
-
-from services.data_utils import find_col, clean_columns  # už u tebe je
 
 def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -71,21 +127,26 @@ def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
     Umí to pracovat s názvy sloupců, které používají testy (Reg. č., Reg. č..1, SK, SK.1, Množství, MJ evidence, Název 1.1).
     """
     df = df.copy()
-    clean_columns(df)  # ořízne záhlaví, převede na stringy
+    clean_columns(df)
 
-    # Najdi sloupce rodiče (výrobku)
-    p_reg = find_col(df, ["Reg. č.", "Reg. č", "Reg.č.", "reg. č.", "reg. č"])
+    # Najdi sloupce (tolerantně)
+    p_reg = find_col(df, ["Reg. č.", "Reg. č", "Reg.č.", "reg. č.", "reg. č", "reg c", "reg.c"])
     p_sk  = find_col(df, ["SK", "sk"])
 
-    # Najdi sloupce komponenty
-    c_reg = find_col(df, ["Reg. č..1", "Reg. č.1", "Reg.č..1", "reg. č..1", "reg. č.1"])
-    c_sk  = find_col(df, ["SK.1", "SK1", "sk.1", "sk1"])
+    c_reg = find_col(df, ["Reg. č..1", "Reg. č.1", "Reg.č..1", "reg. č..1", "reg. č.1", "Reg c 1", "Reg. c.1"])
+    c_sk  = find_col(df, ["SK.1", "SK1", "sk.1", "sk1", "SK 1"])
     c_nm  = find_col(df, ["Název 1.1", "Nazev 1.1", "název 1.1", "nazev 1.1", "Název", "Nazev"])
-    qty   = find_col(df, ["Množství", "Mnozstvi", "množství", "mnozstvi"])
+    qty   = find_col(df, ["Množství", "Mnozstvi", "množství", "mnozstvi", "qty"])
     unit  = find_col(df, ["MJ evidence", "MJ", "Jednotka", "jednotka"])
 
-    # Ošetři, že minimální sada existuje (pro testy stačí níže uvedené)
-    for need, nm in [("rodič Reg. č.", p_reg), ("rodič SK", p_sk), ("komponenta Reg. č..1", c_reg), ("komponenta SK.1", c_sk), ("množství", qty)]:
+    # Minimální sada musí existovat
+    for need, nm in [
+        ("rodič Reg. č.", p_reg),
+        ("rodič SK", p_sk),
+        ("komponenta Reg. č..1", c_reg),
+        ("komponenta SK.1", c_sk),
+        ("množství", qty),
+    ]:
         if nm is None:
             raise KeyError(f"Nebyl nalezen sloupec pro {need}")
 
@@ -111,21 +172,28 @@ def nacti_data():
     if "datum" in plan.columns:
         to_date_col(plan, "datum")
 
-    # Normalizace klíčových čísel v receptu (rodič/komponenta)
-    # Rodič (parent)
-    recepty["_P_SK"]  = recepty.get("SK").map(_safe_int) if "SK" in recepty.columns else None
-    recepty["_P_REG"] = recepty.get("Reg. č.").map(_safe_int) if "Reg. č." in recepty.columns else None
-    # Komponenta (child)
-    recepty["_C_SK"]  = recepty.get("SK.1").map(_safe_int) if "SK.1" in recepty.columns else None
-    recepty["_C_REG"] = recepty.get("Reg. č..1").map(_safe_int) if "Reg. č..1" in recepty.columns else None
+    # Bezpečné vyhledání sloupců v receptuře (tolerantně)
+    col_p_sk  = find_col(recepty, ["SK"])
+    col_p_reg = find_col(recepty, ["Reg. č.", "Reg. č", "Reg c", "Reg. c", "Reg.č."])
 
-    # Množství na kus – numeric
-    if "Množství" in recepty.columns:
-        recepty["_C_QTY"] = pd.to_numeric(recepty["Množství"], errors="coerce").fillna(0.0)
+    col_c_sk  = find_col(recepty, ["SK.1", "SK 1", "sk1", "sk.1"])
+    col_c_reg = find_col(recepty, ["Reg. č..1", "Reg. č. 1", "Reg c 1", "Reg. c.1", "Reg.č..1"])
+    col_c_qty = find_col(recepty, ["Množství", "Mnozstvi", "qty"])
+
+    # Normalizace klíčových čísel v receptu (rodič/komponenta) – jen pokud sloupce existují
+    recepty["_P_SK"]  = recepty[col_p_sk].map(_safe_int) if col_p_sk else None
+    recepty["_P_REG"] = recepty[col_p_reg].map(_safe_int) if col_p_reg else None
+    recepty["_C_SK"]  = recepty[col_c_sk].map(_safe_int) if col_c_sk else None
+    recepty["_C_REG"] = recepty[col_c_reg].map(_safe_int) if col_c_reg else None
+
+    # Množství na kus – numeric (pokud máme sloupec)
+    if col_c_qty:
+        recepty["_C_QTY"] = pd.to_numeric(recepty[col_c_qty], errors="coerce").fillna(0.0)
     else:
         recepty["_C_QTY"] = 0.0
 
     return recepty, plan
+
 
 # ---------------------------- Rozklad výrobku ----------------------------
 
@@ -136,6 +204,7 @@ def rozloz_vyrobek(vyrobek_id, mnozstvi, recepty, navstiveno=None):
 
     if vyrobek_id in navstiveno:
         return []
+    navstiveno.add(vyrobek_id)
 
     # rozdělení "400-12345" na sk a reg
     vyrobek_sk, vyrobek_reg_c = vyrobek_id.split("-", 1)
@@ -144,7 +213,6 @@ def rozloz_vyrobek(vyrobek_id, mnozstvi, recepty, navstiveno=None):
 
     # musí existovat sloupce z _prepare_recepty
     if "_P_REG" not in recepty.columns or "_P_SK" not in recepty.columns:
-        # pro jistotu připravit, kdyby někdo volal bez přípravy
         recepty = _prepare_recepty(recepty)
 
     # najdi komponenty pro daný výrobek
@@ -186,21 +254,31 @@ def rozloz_vyrobek(vyrobek_id, mnozstvi, recepty, navstiveno=None):
 
 # ---------------------------- Výpočet a historie 'koupeno' ----------------------------
 
-def spocitej_potrebne_ingredience(recepty, plan):
-    
+def spocitej_potrebne_ingredience(recepty: pd.DataFrame, plan: pd.DataFrame) -> pd.DataFrame:
+    # připrav receptury (už tolerantní)
     recepty = _prepare_recepty(recepty)
+
+    # očisti a toleruj názvy sloupců i v PLÁNU
+    clean_columns(plan)
+
+    COL_PLAN_REG  = find_col(plan, ["reg.č", "reg c", "reg.c", "regc", "reg č", "reg"])
+    COL_PLAN_QTY  = find_col(plan, ["mnozstvi", "množství", "qty", "mnozství"])
+    COL_PLAN_DATE = find_col(plan, ["datum", "date", "dat", "DATUM"])
+
     vysledky = []
     for _, row in plan.iterrows():
-        # z plánu: reg.č je rodičovský REG, výrobek je 400-<reg.č>
-        vyrobek_reg_c = row.get('reg.č')
+        vyrobek_reg_c = row.get(COL_PLAN_REG)
+        if vyrobek_reg_c is None:
+            # řádek plánu bez identifikace výrobku přeskoč
+            continue
+
         vyrobek_id = f"400-{_safe_int(vyrobek_reg_c)}"
 
-        mnozstvi = _safe_float(row.get("mnozstvi")) or 0.0
-        datum = row.get("datum")
+        mnozstvi = _safe_float(row.get(COL_PLAN_QTY)) or 0.0
+        datum = row.get(COL_PLAN_DATE, None)
 
         ingredience = rozloz_vyrobek(vyrobek_id, mnozstvi, recepty)
         for ingr in ingredience:
-            # přeskoč, pokud se někde nepodařilo určit SK/RC
             if ingr["ingredience_sk"] is None or ingr["ingredience_rc"] is None:
                 continue
             vysledky.append({
@@ -210,19 +288,17 @@ def spocitej_potrebne_ingredience(recepty, plan):
                 "ingredience_rc": ingr["ingredience_rc"],
                 "ingredience_sk": ingr["ingredience_sk"],
                 "potreba": ingr["potreba"],
-                "jednotka": ingr["jednotka"]
+                "jednotka": ingr["jednotka"],
             })
 
     df = pd.DataFrame(vysledky)
     if df.empty:
-        # nic k výrobě -> vrať prázdný DF se správnými sloupci
         return pd.DataFrame(columns=["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka","koupeno"])
 
     to_date_col(df, "datum")
-
     df = df.groupby(["datum","ingredience_sk","ingredience_rc","nazev","jednotka"], as_index=False)["potreba"].sum()
-    df = df[["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka"]]
-    return df
+    return df[["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka"]]
+
 
 def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
     """
@@ -239,18 +315,6 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
     def clean_columns_local(df: pd.DataFrame) -> None:
         df.columns = [str(c).strip() for c in df.columns]
 
-    def _safe_int(v):
-        try:
-            return int(float(str(v).replace(",", ".")))
-        except Exception:
-            return None
-
-    def _key_txt(v) -> str:
-        if v is None:
-            return ""
-        i = _safe_int(v)
-        return str(i) if i is not None else str(v).strip()
-
     def _qty_to_int_micro(v) -> int:
         """
         Převod na celé číslo v mikro-jednotkách přes Decimal:
@@ -265,7 +329,6 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
             d = Decimal(s)
         except (InvalidOperation, Exception):
             return 0
-        # kvantizace na SCALE míst + přenásobení
         q = d.quantize(Decimal(10) ** (-SCALE), rounding=ROUND_HALF_UP)
         return int((q * (Decimal(10) ** SCALE)).to_integral_value(rounding=ROUND_HALF_UP))
 
@@ -278,8 +341,8 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
     df_new["koupeno"] = False
 
     # klíče a množství (int mikro)
-    df_new["__sk"]  = df_new.get("ingredience_sk", "").map(_key_txt)
-    df_new["__rc"]  = df_new.get("ingredience_rc", "").map(_key_txt)
+    df_new["__sk"]    = df_new.get("ingredience_sk", "").map(_key_txt)
+    df_new["__rc"]    = df_new.get("ingredience_rc", "").map(_key_txt)
     df_new["__qty_i"] = df_new.get("potreba", 0).map(_qty_to_int_micro)
 
     # --- STARÝ VÝSTUP ---
@@ -287,7 +350,7 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
         old = pd.read_excel(OUTPUT_EXCEL)
     except Exception:
         # žádná historie → všude koupeno=False (už nastaveno)
-        return df_new.drop(columns=["__sk","__rc","__qty_i"], errors="ignore")
+        return df_new.drop(columns=["__sk", "__rc", "__qty_i"], errors="ignore")
 
     old = old.fillna("")
     clean_columns_local(old)
@@ -306,7 +369,7 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
     old["__sk"] = old["ingredience_sk"].map(_key_txt)
     old["__rc"] = old["ingredience_rc"].map(_key_txt)
 
-    old_qty_col = find_col(old, ["mnozstvi", "potreba"])
+    old_qty_col = find_col(old, ["mnozstvi", "množství", "potreba", "quantity", "qty"])
     if old_qty_col is None:
         old["__qty_i"] = 0
     else:
@@ -322,11 +385,11 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
     # součty po klíčích
     old_grp = (
         old.groupby(key_cols, as_index=False)
-           .agg(prev_qty_i=("__qty_i","sum"), prev_koupeno=("__k","max"))
+           .agg(prev_qty_i=("__qty_i", "sum"), prev_koupeno=("__k", "max"))
     )
     new_grp = (
         df_new.groupby(key_cols, as_index=False)
-              .agg(new_qty_i=("__qty_i","sum"))
+              .agg(new_qty_i=("__qty_i", "sum"))
     )
 
     merged = new_grp.merge(old_grp, on=key_cols, how="left")
@@ -346,7 +409,7 @@ def _recalculate_koupeno_against_previous(df_new: pd.DataFrame) -> pd.DataFrame:
     df_new["keep_true"] = df_new["keep_true"].fillna(False).astype(bool)
     df_new["koupeno"] = (df_new["koupeno"].astype(bool)) | df_new["keep_true"]
 
-    return df_new.drop(columns=["__sk","__rc","__qty_i","keep_true"], errors="ignore")
+    return df_new.drop(columns=["__sk", "__rc", "__qty_i", "keep_true"], errors="ignore")
 
 
 def compute_plan() -> pd.DataFrame:
@@ -358,82 +421,6 @@ def compute_plan() -> pd.DataFrame:
         return vysledek
     vysledek = _recalculate_koupeno_against_previous(vysledek)
     return vysledek
-
-
-
-# ... máš tu už nacti_data(), rozloz_vyrobek(...) atd. pro ingredience
-
-def spocitej_polotovary(recepty: pd.DataFrame, plan: pd.DataFrame) -> pd.DataFrame:
-    """
-    Vrátí přehled polotovarů (SK 300), které jsou PŘÍMO v kusovníku hotového výrobku (SK 400).
-    Žádná rekurze – jen immediate children (parent SK=400 & child SK=300).
-    """
-    # mapování sloupců dle tvého xlsx:
-    # parent: ("Reg. č.", "SK")
-    # child:  ("Reg. č..1", "Název 1.1", "Množství", "MJ evidence", "SK.1")
-
-    # Najdi si názvy sloupců (pro jistotu case-insensitive)
-    col_p_reg = find_col(recepty, ["Reg. č."])
-    col_p_sk  = find_col(recepty, ["SK"])
-    col_c_reg = find_col(recepty, ["Reg. č..1"])
-    col_c_name= find_col(recepty, ["Název 1.1"])
-    col_c_qty = find_col(recepty, ["Množství"])
-    col_c_mj  = find_col(recepty, ["MJ evidence"])
-    col_c_sk  = find_col(recepty, ["SK.1"])
-
-    out_rows = []
-
-    for _, p in plan.iterrows():
-        vyr_regc = p[find_col(plan, ["reg.č"])]
-        mnozstvi = float(p[find_col(plan, ["mnozstvi"])])
-        datum    = p.get("datum", None)
-
-        # parent = hotový výrobek (SK 400)
-        mask_parent = (recepty[col_p_reg] == int(vyr_regc)) & (recepty[col_p_sk] == 400)
-        podrecept = recepty.loc[mask_parent]
-
-        if podrecept.empty:
-            continue
-
-        # child = polotovar (SK 300), bez rekurze
-        childs = podrecept.loc[podrecept[col_c_sk] == 300]
-        for _, r in childs.iterrows():
-            celkem = float(r[col_c_qty]) * mnozstvi
-            out_rows.append({
-                "datum": datum,
-                "vyrobek": f"400-{int(vyr_regc)}",
-                "nazev": str(r[col_c_name]),
-                "ingredience_rc": int(r[col_c_reg]),
-                "ingredience_sk": int(r[col_c_sk]),  # 300
-                "potreba": celkem,
-                "jednotka": str(r[col_c_mj]),
-            })
-
-    if not out_rows:
-        return pd.DataFrame(columns=["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka"])
-
-    df = pd.DataFrame(out_rows)
-    to_date_col(df, "datum")
-    df = (df.groupby(["datum","ingredience_sk","ingredience_rc","nazev","jednotka"], as_index=False)["potreba"]
-            .sum())
-    return df[["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka"]]
-
-
-
-# ---------- pomocné převody/klíče (stabilní, bez problémů s float) ------------
-
-def _safe_int(v):
-    try:
-        return int(float(str(v).replace(",", ".")))
-    except Exception:
-        return None
-
-def _key_txt(v) -> str:
-    """Stabilní textový klíč: 150 i 150.0 -> '150'; None -> ''."""
-    if v is None:
-        return ""
-    i = _safe_int(v)
-    return str(i) if i is not None else str(v).strip()
 
 
 # ---------- výpočet polotovarů (přímé SK300 z plánů SK400) --------------------
@@ -450,12 +437,12 @@ def spocitej_polotovary(recepty: pd.DataFrame, plan: pd.DataFrame) -> tuple[pd.D
     """
     # -- pojmenuj důležité sloupce v receptuře --
     # parent (finální výrobek):
-    COL_P_REG = find_col(recepty, ["Reg. č."]) or "Reg. č."
+    COL_P_REG = find_col(recepty, ["Reg. č.", "Reg c", "Reg. c", "Reg.č."]) or "Reg. č."
     COL_P_SK  = find_col(recepty, ["SK"]) or "SK"
     # child (komponenta):
-    COL_C_REG = find_col(recepty, ["Reg. č..1", "Reg. č. 1", "Reg.č..1"]) or "Reg. č..1"
-    COL_C_SK  = find_col(recepty, ["SK.1", "SK 1"]) or "SK.1"
-    COL_C_NAM = find_col(recepty, ["Název 1.1", "Název komponenty"]) or "Název 1.1"
+    COL_C_REG = find_col(recepty, ["Reg. č..1", "Reg. č. 1", "Reg c 1", "Reg. c.1", "Reg.č..1"]) or "Reg. č..1"
+    COL_C_SK  = find_col(recepty, ["SK.1", "SK 1", "sk1", "sk.1"]) or "SK.1"
+    COL_C_NAM = find_col(recepty, ["Název 1.1", "Název komponenty", "Nazev 1.1", "Nazev"]) or "Název 1.1"
     COL_QTY   = find_col(recepty, ["Množství", "Mnozstvi", "qty"]) or "Množství"
     COL_MJ    = find_col(recepty, ["MJ evidence", "MJ", "jednotka"]) or "MJ evidence"
 
@@ -463,15 +450,15 @@ def spocitej_polotovary(recepty: pd.DataFrame, plan: pd.DataFrame) -> tuple[pd.D
     COL_P_NAME = find_col(recepty, ["Název 1", "Název", "nazev"])
 
     # -- pojmenuj sloupce v plánu --
-    COL_PLAN_REG = find_col(plan, ["reg.č", "reg_c", "reg", "reg. c"]) or "reg.č"
+    COL_PLAN_REG = find_col(plan, ["reg.č", "reg_c", "reg", "reg. c", "reg c", "reg.c"]) or "reg.č"
     COL_PLAN_QTY = find_col(plan, ["mnozstvi", "množství", "qty"]) or "mnozstvi"
 
     to_date_col(plan, "datum")
     plan = plan.copy()
 
     # -- akumulace výsledků --
-    rows_main   : list[dict] = []
-    rows_detail : list[dict] = []
+    rows_main: list[dict] = []
+    rows_detail: list[dict] = []
 
     for _, prow in plan.iterrows():
         final_reg_c = _safe_int(prow.get(COL_PLAN_REG))
@@ -491,7 +478,6 @@ def spocitej_polotovary(recepty: pd.DataFrame, plan: pd.DataFrame) -> tuple[pd.D
         final_name = ""
         if COL_P_NAME and COL_P_NAME in sub.columns:
             try:
-                # vezmi první neprázdný název rodiče, pokud existuje
                 fn = sub[COL_P_NAME].dropna().astype(str).str.strip()
                 final_name = next((x for x in fn if x), "")
             except Exception:
@@ -531,29 +517,28 @@ def spocitej_polotovary(recepty: pd.DataFrame, plan: pd.DataFrame) -> tuple[pd.D
     # -- do DataFrame + agregace --
     df_main = pd.DataFrame(rows_main)
     if df_main.empty:
-        df_main = pd.DataFrame(columns=["datum","polotovar_sk","polotovar_rc","nazev","potreba","jednotka"])
+        df_main = pd.DataFrame(columns=["datum", "polotovar_sk", "polotovar_rc", "nazev", "potreba", "jednotka"])
 
-    # jen den (bez času)
     to_date_col(df_main, "datum")
 
-    # součet napříč plány pro stejný den a polotovar
     if not df_main.empty:
         df_main["_num"] = pd.to_numeric(df_main["potreba"], errors="coerce").fillna(0.0)
         df_main = (
             df_main
-            .groupby(["datum","polotovar_sk","polotovar_rc","nazev","jednotka"], as_index=False)
-            .agg(potreba=("_num","sum"))
+            .groupby(["datum", "polotovar_sk", "polotovar_rc", "nazev", "jednotka"], as_index=False)
+            .agg(potreba=("_num", "sum"))
         )
 
     df_details = pd.DataFrame(rows_detail)
     if df_details.empty:
-        df_details = pd.DataFrame(columns=["datum","polotovar_sk","polotovar_rc","final_rc","final_nazev","mnozstvi","jednotka"])
+        df_details = pd.DataFrame(columns=["datum", "polotovar_sk", "polotovar_rc", "final_rc", "final_nazev", "mnozstvi", "jednotka"])
     to_date_col(df_details, "datum")
 
     return df_main, df_details
 
 
 # ---------- finální pipeline vč. zachování 'vyrobeno' -------------------------
+
 def compute_plan_semifinished() -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Plán polotovarů:
@@ -602,11 +587,11 @@ def compute_plan_semifinished() -> tuple[pd.DataFrame, pd.DataFrame]:
         old["__k"]   = old["vyrobeno"].astype(bool)
 
         has_old_date = "datum" in old.columns
-        key_old = (["datum"] if has_old_date else []) + ["__sk","__rc"]
+        key_old = (["datum"] if has_old_date else []) + ["__sk", "__rc"]
 
         old_grp = (
             old.groupby(key_old, as_index=False)
-               .agg(prev_qty=("__qty","sum"), prev_vyrobeno=("__k","max"))
+               .agg(prev_qty=("__qty", "sum"), prev_vyrobeno=("__k", "max"))
         )
 
         # připrav nové klíče
@@ -614,15 +599,15 @@ def compute_plan_semifinished() -> tuple[pd.DataFrame, pd.DataFrame]:
         df_main["__rc"]  = df_main["polotovar_rc"].map(_key_txt)
         df_main["__qty"] = pd.to_numeric(df_main["potreba"], errors="coerce").fillna(0.0)
 
-        key_new = (["datum"] if ("datum" in df_main.columns and has_old_date) else []) + ["__sk","__rc"]
+        key_new = (["datum"] if ("datum" in df_main.columns and has_old_date) else []) + ["__sk", "__rc"]
 
         new_grp = (
             df_main.groupby(key_new, as_index=False)
-                   .agg(new_qty=("__qty","sum"))
+                   .agg(new_qty=("__qty", "sum"))
         )
 
         # merge a logika zachování
-        on_cols = key_old if key_old == key_new else ["__sk","__rc"]
+        on_cols = key_old if key_old == key_new else ["__sk", "__rc"]
         merged = new_grp.merge(old_grp, on=on_cols, how="left")
         merged["prev_qty"]      = merged["prev_qty"].fillna(0.0)
         merged["prev_vyrobeno"] = merged["prev_vyrobeno"].fillna(False).astype(bool)
@@ -632,12 +617,12 @@ def compute_plan_semifinished() -> tuple[pd.DataFrame, pd.DataFrame]:
 
         # promítnout zpět na řádky df_main
         df_main = df_main.merge(
-            merged[ (key_new if key_new else ["__sk","__rc"]) + ["keep_true"] ],
-            on=(key_new if key_new else ["__sk","__rc"]),
+            merged[(key_new if key_new else ["__sk", "__rc"]) + ["keep_true"]],
+            on=(key_new if key_new else ["__sk", "__rc"]),
             how="left"
         )
         df_main["vyrobeno"] = df_main["vyrobeno"] | df_main["keep_true"].fillna(False)
-        df_main.drop(columns=["__sk","__rc","__qty","keep_true"], inplace=True, errors="ignore")
+        df_main.drop(columns=["__sk", "__rc", "__qty", "keep_true"], inplace=True, errors="ignore")
 
     # 5) zapiš Excel s bloky/listy (Prehled, Detaily, Polotovary)
     ensure_output_semis_excel(df_main, df_details)
