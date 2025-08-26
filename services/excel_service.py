@@ -1,8 +1,9 @@
 # services/excel_service.py
-import math
+from pathlib import Path
 import pandas as pd
-from .paths import OUTPUT_EXCEL
+import services.paths as sp
 from .data_utils import to_date_col, find_col, to_bool_cell_excel
+
 
 def _safe_int(v):
     try:
@@ -30,10 +31,10 @@ def _normalize_keys_inplace(df: pd.DataFrame):
 def ensure_output_excel(data):
     """Zpětná kompatibilita pro ingredience (bool sloupec 'koupeno')."""
     ensure_output_excel_generic(
-        data=data,
-        output_path=OUTPUT_EXCEL,
-        bool_col="koupeno",
-    )
+       data=data,
+       output_path=sp.OUTPUT_EXCEL,  # DŮLEŽITÉ: čte se vždy runtime hodnota (možná monkeypatchnutá)
+       bool_col="koupeno",
+   )
 
 def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
     """
@@ -71,7 +72,10 @@ def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
         df_new[bool_col] = df_new[bool_col].map(to_bool_cell_excel).astype(bool)
         # final normalizace klíčů na odolné typy:
         _normalize_keys_inplace(df_new)
-        df_new.to_excel(output_path, index=False)
+        
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df_new.to_excel(out, index=False)
         return
 
     # --- máme stará data → merge ---
@@ -84,8 +88,17 @@ def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
         df_old[old_k] = False
     df_old[old_k] = df_old[old_k].map(to_bool_cell_excel).astype(bool)
 
-    # KLÍČE: všechny kromě bool sloupce
-    key_cols = [c for c in df_new.columns if c.strip().lower() != bool_col.lower()]
+    
+    # KLÍČE: jen identifikační sloupce (NE množství apod.)
+    # držíme se kontraktu: (datum, ingredience_sk, ingredience_rc, nazev, jednotka)
+    preferred_keys = ["datum", "ingredience_sk", "ingredience_rc", "nazev", "jednotka"]
+    present = [c for c in preferred_keys if c in df_new.columns]
+    if present:
+        key_cols = present
+    else:
+        # Fallback: všechno kromě bool sloupce a zjevně proměnlivých polí
+        skip = {bool_col.lower(), "potreba", "mnozstvi", "množství"}
+        key_cols = [c for c in df_new.columns if c.strip().lower() not in skip]
 
     # Doplň do df_old chybějící sloupce (kvůli merži)
     for c in key_cols:
@@ -119,4 +132,6 @@ def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
             merged.drop(columns=[c], inplace=True)
 
     _normalize_keys_inplace(merged)
-    merged.to_excel(output_path, index=False)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_excel(out, index=False)

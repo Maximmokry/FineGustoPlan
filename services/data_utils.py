@@ -2,6 +2,12 @@
 import pandas as pd
 from datetime import date
 import math
+import unicodedata
+
+def _norm_str(x: str) -> str:
+    # odstraň diakritiku a sjednoť case/trim
+    s = unicodedata.normalize("NFKD", str(x)).encode("ascii", "ignore").decode("ascii")
+    return s.strip().lower()
 
 def find_col(df: pd.DataFrame, candidates):
     cols = {str(c).strip().lower(): c for c in df.columns}
@@ -29,31 +35,46 @@ def fmt_cz_date(v):
     except Exception:
         return str(v) if v is not None else ""
 
-def to_bool_cell_excel(x):
+def to_bool_cell_excel(v) -> bool:
     """
-    Převod na čisté bool bez jazykových slov:
-    - True/False zůstává
-    - 1/0 (i jako text) -> True/False
-    - prázdno/None/NaN/text -> False
+    Normalizace různých vstupů na bool pro Excel zápis/čtení.
+    Akceptuje True/False, 1/0, "1"/"0", "true"/"false", "yes"/"no",
+    české "ano"/"ne", i zaškrtnutí typu "x", "✓", "✔".
+    Prázdné / NaN -> False.
     """
-    if x is None:
+    # Přímé bool
+    if isinstance(v, bool):
+        return v
+
+    # None / NaN -> False
+    if v is None:
         return False
-    if isinstance(x, bool):
-        return x
-    if isinstance(x, float):
-        if math.isnan(x):
-            return False
-        return x != 0.0
-    if isinstance(x, int):
-        return x != 0
-    s = str(x).strip()
-    if s == "":
+    if isinstance(v, float) and math.isnan(v):
         return False
     try:
-        return float(s.replace(",", ".")) != 0.0
+        # pandas NaT / NaN-like
+        if pd.isna(v):
+            return False
     except Exception:
+        pass
+
+    # Čísla
+    if isinstance(v, (int, float)):
+        return v != 0
+
+    # Řetězce
+    s = _norm_str(v)
+    if s in {"true", "t", "yes", "pravda","y", "ano", "a", "1", "x", "✓", "✔"}:
+        return True
+    if s in {"false", "f", "no","nepravda" "n", "ne", "0", "", "-"}:
         return False
 
+    # Zkusíme číselný string ("0", "0.0", "1,0", ...)
+    try:
+        sval = s.replace(",", ".")
+        return float(sval) != 0.0
+    except Exception:
+        return False
 # ---- NOVÉ: bezpečné čištění názvů sloupců a normalizace čísel na string ----
 
 def clean_columns(df: pd.DataFrame):
@@ -67,7 +88,9 @@ def norm_num_to_str(v) -> str:
     ostatní -> ořezaný string
     """
     try:
-        f = float(v)
+        # akceptuj i českou čárku
+        s = str(v).replace(",", ".")
+        f = float(s)
         if math.isnan(f):
             return ""
         if f.is_integer():

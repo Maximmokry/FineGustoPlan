@@ -30,6 +30,6 @@ def test_to_bool_cell_excel_conversions():
     assert to_bool_cell_excel("0,0") is False  # evropská čárka
     # prázdno a texty -> False (neřešíme jazyky)
     assert to_bool_cell_excel("") is False
-    assert to_bool_cell_excel("PRAVDA") is False
-    assert to_bool_cell_excel("YES") is False
+    assert to_bool_cell_excel("PRAVDA") is True
+    assert to_bool_cell_excel("YES") is True
     assert to_bool_cell_excel(None) is False

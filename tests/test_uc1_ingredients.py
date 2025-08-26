@@ -66,7 +66,7 @@ def test_ensure_output_excel_creates_and_has_bool():
     assert TEST_OUT.exists(), "Soubor se měl vytvořit."
     out = pd.read_excel(TEST_OUT)
     assert "koupeno" in out.columns
-    assert out.loc[0, "koupeno"] is False
+    assert out.loc[0, "koupeno"] == False
 
 
 def test_merge_preserves_true_flags():
@@ -92,7 +92,7 @@ def test_merge_preserves_true_flags():
     es.ensure_output_excel_generic(mod, TEST_OUT, bool_col="koupeno")
 
     out = pd.read_excel(TEST_OUT)
-    assert out.loc[0, "koupeno"] is True, "True flag se nesmí přepsat na False."
+    assert out.loc[0, "koupeno"] == True, "True flag se nesmí přepsat na False."
 
 
 # -------------------------------------------------------
@@ -200,9 +200,10 @@ def test_open_results_clicks_buy_and_saves(monkeypatch):
 
     def fake_create(df_full, col_k, agg_flag, location=None):
         # použijeme originální builder, ale okno nahradíme FakeWindow
+        
         w, buy_map, rowkey_map = orig_create(df_full, col_k, agg_flag, location=location)
         nonlocal created_buy_map
-        created_buy_map = buy_map.copy()
+        created_buy_map = (buy_map or {}).copy()
 
         # najděme první neagregovaný button '-BUY-<i>-'
         first_btn = next((k for k in buy_map if k.startswith("-BUY-")), None)
@@ -235,7 +236,7 @@ def test_open_results_clicks_buy_and_saves(monkeypatch):
     # 7) Ověření – koupeno by mělo být True po kliknutí
     out = pd.read_excel(TEST_OUT)
     assert "koupeno" in out.columns
-    assert out.loc[0, "koupeno"] is True
+    assert out.loc[0, "koupeno"] == True
 
 
 # ----------------------------------------------------------------
