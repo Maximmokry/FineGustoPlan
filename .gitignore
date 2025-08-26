@@ -16,3 +16,7 @@ build/
 # IDE configs
 .vscode/
 .idea/
+
+# results
+ingredience.xlsx
+polotovary.xlsx

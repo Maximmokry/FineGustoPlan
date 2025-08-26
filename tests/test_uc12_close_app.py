@@ -175,6 +175,7 @@ def test_uc12_read_failure_is_handled_and_window_closed(capsys):
     fake_sg._event_queue = []
     mw = _fresh_import_main_window()
     mw.run()
+    
 
     # Ověř, že se něco zalogovalo na stderr (není nutné striktně, ale sanitační check)
     out, err = capsys.readouterr()

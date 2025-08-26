@@ -14,6 +14,7 @@ from services.gui_helpers import (
     recreate_window_preserving,
     dbg_set_enabled,
 )
+from services import error_messages as ERR  # <- centralizované hlášky
 
 # ------------------------- DEBUG -------------------------
 dbg_set_enabled(False)  # zap/vyp debug výpisů v gui_helpers
@@ -142,7 +143,7 @@ def _build_table_layout(df_full: pd.DataFrame, col_k: str, aggregate: bool = Fal
             row_key = f"-BUY-{i_int}-"
             vis_key = f"-ROW-{i_int}-"
             buy_map[row_key] = [i_int]
-            rowkey_map[i_int] = vis_key  # doplněno – testy očekávají plnění rowkey_map
+            rowkey_map[i_int] = vis_key  # testy očekávají plnění rowkey_map
 
             row_widgets = [
                 sg.Text(fmt_cz_date(r.get("datum","")), size=(12,1), pad=CELL_PAD),
@@ -153,7 +154,6 @@ def _build_table_layout(df_full: pd.DataFrame, col_k: str, aggregate: bool = Fal
                 sg.Text(str(r.get("jednotka","")),       size=(8,1),  pad=CELL_PAD),
                 sg.Button("Koupeno", key=row_key, size=(10,1), pad=BTN_PAD),
             ]
-            # jedním řádkem stačí (testy nevyžadují Column pro skrývání)
             rows.append([*row_widgets])
 
         return rows, buy_map, rowkey_map
@@ -275,7 +275,7 @@ def open_results():
         to_date_col(df_full, "datum")
 
         if df_full.empty:
-            sg.popup("Výsledný Excel je prázdný – není co zobrazit.")
+            sg.popup(ERR.MSG["results_empty"])
             return
 
         col_k = find_col(df_full, ["koupeno"])
@@ -289,7 +289,7 @@ def open_results():
         agg_flag = False
         w, buy_map, _ = _create_results_window(df_full, col_k, agg_flag, location=LAST_WIN_POS)
         if w is None:
-            sg.popup("Všechny položky jsou již koupené.")
+            sg.popup(ERR.MSG["results_all_bought"])
             return
         _remember_pos(w)
 
@@ -301,11 +301,16 @@ def open_results():
                 break
 
             if ev == "-AGG-":
-                agg_flag = bool(vals.get("-AGG_", vals.get("-AGG-", False)))
+                # Idempotentní přepínač: ber hodnotu z vals, jinak invertuj (pro headless)
+                target = bool(vals["-AGG-"]) if isinstance(vals.get("-AGG-"), bool) else not agg_flag
+                if target == agg_flag:
+                    continue
+                agg_flag = target
+
                 builder = _builder_factory(df_full, col_k, agg_flag)
                 res = recreate_window_preserving(w, builder, col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup("Všechny položky jsou již koupené.")
+                    sg.popup(ERR.MSG["results_all_bought"])
                     break
                 w, buy_map, _ = res
                 continue
@@ -313,7 +318,7 @@ def open_results():
             if isinstance(ev, str) and ev.startswith("-BUY-"):
                 idx_list = buy_map.get(ev, [])
                 if not idx_list:
-                    sg.popup_error("Chybné mapování indexů pro tlačítko. Zkuste přepnout agregaci a zpět.")
+                    ERR.show_error(ERR.MSG["results_index_map"])
                     continue
 
                 # Označit v DF + uložit
@@ -325,15 +330,14 @@ def open_results():
                     df_full.to_excel(OUTPUT_EXCEL, index=False)
                     _debug_dump(df_full, "AFTER_SAVE", col_k)
                 except Exception as e:
-                    tb = traceback.format_exc()
-                    sg.popup_error(f"Chyba při ukládání do Excelu: {e}\n\n{tb}")
+                    ERR.show_error(ERR.MSG["results_save"], e)
                     continue
 
                 # Rekreace okna (bez skoku), protože se dataset zmenšil
                 builder = _builder_factory(df_full, col_k, agg_flag)
                 res = recreate_window_preserving(w, builder, col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup("Všechny položky jsou již koupené. Okno bude zavřeno.")
+                    sg.popup(ERR.MSG["results_all_bought_close"])
                     break
                 w, buy_map, _ = res
                 continue
@@ -345,6 +349,4 @@ def open_results():
             pass
 
     except Exception as e:
-        tb = traceback.format_exc()
-        sg.popup_error(f"Chyba v okně výsledků:\n{e}\n\n{tb}")
-        print(f"[ERROR] Chyba v okně výsledků: {e}\n{tb}", flush=True)
+        ERR.show_error(ERR.MSG["results_window"], e)
