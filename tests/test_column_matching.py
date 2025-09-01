@@ -1,7 +1,8 @@
 import pandas as pd
 import pytest
 from datetime import date as _date
-import main as core
+from services.compute_common import find_col
+import services.ingredients_logic as core
 
 
 def test_find_col_loose_variants():
@@ -11,24 +12,24 @@ def test_find_col_loose_variants():
 
     # Reg. č. varianty
     for variant in ["reg. č.", "REG C", "regc", "Reg_c", "reg-c", "reg.č."]:
-        assert core.find_col(df, [variant]) == "Reg. č."
+        assert find_col(df, [variant]) == "Reg. č."
 
     # Množství varianty
     for variant in ["mnozstvi", "MNOZSTVI", "množství"]:
-        assert core.find_col(df, [variant]) == "Množství"
+        assert find_col(df, [variant]) == "Množství"
 
     # SK varianty
     for variant in ["sk", "Sk ", " SK"]:
-        assert core.find_col(df, [variant]) == "SK"
+        assert find_col(df, [variant]) == "SK"
 
     # SK.1 varianty
     for variant in ["sk1", "Sk 1", "SK.1"]:
-        assert core.find_col(df, [variant]) == "SK.1"
+        assert find_col(df, [variant]) == "SK.1"
 
 
 def test_find_col_returns_none_if_not_found():
     df = pd.DataFrame(columns=["A", "B"])
-    assert core.find_col(df, ["xyz"]) is None
+    assert find_col(df, ["xyz"]) is None
 
 
 def test_compute_plan_with_renamed_columns(monkeypatch):
@@ -51,7 +52,7 @@ def test_compute_plan_with_renamed_columns(monkeypatch):
     # monkeypatch na nacti_data()
     def fake_nacti_data():
         return recepty, plan
-    monkeypatch.setattr(core, "nacti_data", fake_nacti_data)
+    monkeypatch.setattr("services.ingredients_logic.nacti_data", fake_nacti_data)
 
     df = core.compute_plan()
     # očekáváme výsledek
@@ -81,7 +82,7 @@ def test_compute_plan_with_various_date_column_names(monkeypatch, date_col_name)
 
     def fake_nacti_data():
         return recepty, plan
-    monkeypatch.setattr(core, "nacti_data", fake_nacti_data)
+    monkeypatch.setattr("services.ingredients_logic.nacti_data", fake_nacti_data)
 
     df = core.compute_plan()
     assert not df.empty

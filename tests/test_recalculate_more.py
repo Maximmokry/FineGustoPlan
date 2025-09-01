@@ -1,8 +1,7 @@
 import pandas as pd
 from datetime import date
 import pytest
-
-import main  # používáme implementaci v main.py
+from services.ingredients_logic import _recalculate_koupeno_against_previous
 
 def test_float_quantity_equality_keeps_true(tmp_path, monkeypatch):
     """
@@ -10,7 +9,7 @@ def test_float_quantity_equality_keeps_true(tmp_path, monkeypatch):
     Nemá se resetovat na False, protože množství je numericky stejné.
     """
     out_file = tmp_path/"vysledek.xlsx"
-    monkeypatch.setattr("main.OUTPUT_EXCEL", out_file, raising=False)
+    monkeypatch.setattr("services.ingredients_logic.OUTPUT_EXCEL", out_file, raising=False)
 
     old = pd.DataFrame([{
         "datum": date(2025,8,20),
@@ -32,7 +31,7 @@ def test_float_quantity_equality_keeps_true(tmp_path, monkeypatch):
         "jednotka": "kg",
     }])
 
-    df = main._recalculate_koupeno_against_previous(new)
+    df = _recalculate_koupeno_against_previous(new)
     assert df["koupeno"].tolist() == [True]
 
 def test_float_quantity_increase_resets_false(tmp_path, monkeypatch):
@@ -40,7 +39,7 @@ def test_float_quantity_increase_resets_false(tmp_path, monkeypatch):
     Staré množství 1.1, nové množství 1.2 → koupeno se musí resetovat na False.
     """
     out_file = tmp_path/"vysledek.xlsx"
-    monkeypatch.setattr("main.OUTPUT_EXCEL", out_file, raising=False)
+    monkeypatch.setattr("services.ingredients_logic.OUTPUT_EXCEL", out_file, raising=False)
 
     old = pd.DataFrame([{
         "datum": date(2025,8,20),
@@ -62,5 +61,5 @@ def test_float_quantity_increase_resets_false(tmp_path, monkeypatch):
         "jednotka": "kg",
     }])
 
-    df = main._recalculate_koupeno_against_previous(new)
+    df = _recalculate_koupeno_against_previous(new)
     assert df["koupeno"].tolist() == [False]

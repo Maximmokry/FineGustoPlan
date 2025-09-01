@@ -1,8 +1,7 @@
 import os
 import pandas as pd
 import pytest
-
-from main import _recalculate_koupeno_against_previous
+from services.ingredients_logic import _recalculate_koupeno_against_previous
 from services.paths import OUTPUT_EXCEL
 
 
