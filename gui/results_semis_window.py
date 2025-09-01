@@ -32,7 +32,7 @@ DATE_WIDTH = 20
 SK_WIDTH   = 6
 RC_WIDTH   = 10
 
-NAME_WIDTH_CHARS = 54
+NAME_WIDTH_CHARS = 48
 QTY_WIDTH_CHARS  = 9
 UNIT_WIDTH_CHARS = 5
 
@@ -55,6 +55,24 @@ def _remember_pos(win):
 
 def _force_bool(df: pd.DataFrame, col: str):
     df[col] = df[col].map(to_bool_cell_excel).astype(bool)
+
+# --- přidej někam k utilitám v horní části souboru (např. pod _get_any) ---
+def _fmt_qty_2dec_cz(v) -> str:
+    """
+    Naformátuje číslo na dvě desetinná místa s čárkou jako oddělovačem.
+    Vstup může být číslo nebo text s čárkou/tečkou.
+    Pokud nejde převést na číslo, vrátí původní text.
+    """
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s == "":
+        return ""
+    try:
+        f = float(s.replace(" ", "").replace(",", "."))
+        return f"{f:.2f}".replace(".", ",")
+    except Exception:
+        return s
 
 def _filter_unmade(df: pd.DataFrame, col: str) -> pd.DataFrame:
     _force_bool(df, col)
@@ -95,8 +113,8 @@ def _row_main(d: dict, row_key: str, *, show_action: bool = True):
         sg.Text(str(d.get("polotovar_sk", "")),    size=(SK_WIDTH, 1),   pad=CELL_PAD, font=FONT_ROW),
         sg.Text(str(d.get("polotovar_rc", "")),    size=(RC_WIDTH, 1),   pad=CELL_PAD, font=FONT_ROW),
         _name_cell(d.get("polotovar_nazev", ""), height=1, is_main=True),
-        sg.Text(str(d.get("potreba", "")),         size=(QTY_WIDTH_CHARS, 1),
-                pad=CELL_PAD, justification="right", font=FONT_ROW_BOLD),
+        sg.Text(_fmt_qty_2dec_cz(d.get("potreba", "")), size=(QTY_WIDTH_CHARS, 1),
+        pad=CELL_PAD, justification="right", font=FONT_ROW_BOLD),
         sg.Text(str(d.get("jednotka", "")),        size=(UNIT_WIDTH_CHARS, 1), pad=CELL_PAD, font=FONT_ROW),
     ]
     if show_action:
@@ -109,9 +127,11 @@ def _row_detail(d: dict):
     vyrobek_sk = str(d.get("vyrobek_sk", "") or d.get("final_sk", "")).strip()
     vyrobek_rc = str(d.get("vyrobek_rc", "") or d.get("final_rc", "")).strip()
     name       = str(d.get("vyrobek_nazev", "") or d.get("final_nazev", "")).strip()
-    mnozstvi   = str(d.get("mnozstvi", "")).strip()
+    # --- uvnitř _row_detail() změň přípravu qty_full takto ---
+    mnozstvi   = _fmt_qty_2dec_cz(d.get("mnozstvi", ""))
     jednotka   = str(d.get("jednotka", "")).strip()
     qty_full   = f"{mnozstvi} {jednotka}".strip()
+
 
     return [
         sg.Text("", size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
