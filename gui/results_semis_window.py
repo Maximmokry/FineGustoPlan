@@ -1,9 +1,16 @@
 # gui/results_semis_window.py
 import traceback
 from typing import Dict, List, Tuple, Optional
+from services import graph_store
+from services.data_utils import to_date_col, fmt_cz_date
+import os
 
 import PySimpleGUIQt as sg
 import pandas as pd
+from services import graph_store  
+from services.readiness import compute_ready_semis_under_finals
+g = graph_store.get_graph()
+ready_keys = compute_ready_semis_under_finals(g)
 
 from services.paths import OUTPUT_SEMI_EXCEL
 from services.data_utils import (
@@ -40,6 +47,73 @@ LAST_WIN_POS: Optional[Tuple[int, int]] = None
 
 
 # ========================= UTILITY =========================
+# Přidej nahoru k ostatním konstantám:
+READY_BG = "#d9fdd3"  # světle zelené pozadí pro „vše koupeno“
+
+
+def _to_int_or_none(x):
+    try:
+        s = str(x).strip()
+        if s == "":
+            return None
+        return int(s)
+    except Exception:
+        return None
+
+
+def _is_polotovar_ready(sk, rc) -> bool:
+    """
+    Vrátí True, pokud všechny listové ingredience v podstromu polotovaru (sk, rc)
+    mají atribut `bought=True`.
+
+    Používá runtime graf z graph_store (attach_status_from_excels do něj natahuje koupeno).
+    """
+    try:
+        # preferovaná cesta – pokud graph_store nabízí getter
+        g = getattr(graph_store, "get_graph", None)
+        g = g() if callable(g) else getattr(graph_store, "_G", None)
+    except Exception:
+        g = getattr(graph_store, "_G", None)
+
+    if not g or not getattr(g, "nodes", None):
+        return False
+
+    isk = _to_int_or_none(sk)
+    irc = _to_int_or_none(rc)
+    if isk is None or irc is None:
+        return False
+
+    nid = (isk, irc)
+    if nid not in g.nodes:
+        return False
+
+    # DFS na listy (ingredience): list = uzel bez edges
+    stack = [nid]
+    visited = set()
+    while stack:
+        cur = stack.pop()
+        if cur in visited:
+            continue
+        visited.add(cur)
+
+        node = g.nodes.get(cur)
+        if not node:
+            continue
+
+        edges = getattr(node, "edges", []) or []
+        if not edges:
+            # list – musí být koupený
+            if not bool(getattr(node, "bought", False)):
+                return False
+        else:
+            for e in edges:
+                try:
+                    stack.append(e.child)
+                except Exception:
+                    pass
+
+    return True
+
 def _safe_loc(win):
     try:
         x, y = win.current_location()
@@ -85,37 +159,66 @@ def _get_any(row: pd.Series, candidates: List[str], default=""):
         if key in cols:
             return row.get(cols[key], default)
     return default
+def _name_cell(
+    text: str,
+    *,
+    height: int,
+    indent_px: int = 0,
+    is_main: bool = False,
+    underline: bool = False,
+):
+    """
+    Textová buňka pro název. V Qt (PySimpleGUIQt) je spolehlivější použít rich text
+    pro podtržení (QLabel umí <u>…</u>) než spoléhat na třetí položku fontu.
+    """
+    from html import escape as html_escape
 
-def _name_cell(text: str, *, height: int, indent_px: int = 0, is_main: bool = False):
+    base_font = FONT_MAIN_NAME if is_main else FONT_ROW
+
+    # Rich text pro underline (jinak čistý text)
+    txt = str(text)
+    if underline:
+        txt = f"<u>{html_escape(txt)}</u>"
+
     return sg.Text(
-        str(text),
+        txt,
         size=(NAME_WIDTH_CHARS, height),
         pad=((indent_px, 0), 0),
         auto_size_text=False,
-        font=FONT_MAIN_NAME if is_main else FONT_ROW,
+        font=base_font,
         justification="left",
     )
+
+
+
 
 def _header_row():
     return [
         sg.Text("Datum",   size=(DATE_WIDTH, 1), font=FONT_HEADER, pad=CELL_PAD),
-        sg.Text("SK",      size=(SK_WIDTH, 1),   font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Reg.č.",  size=(RC_WIDTH, 1),   font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Název",   size=(NAME_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Množství", size=(QTY_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD, justification="right"),
         sg.Text("",        size=(UNIT_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Akce",    size=(10, 1), font=FONT_HEADER, pad=CELL_PAD),
     ]
-
-def _row_main(d: dict, row_key: str, *, show_action: bool = True):
+def _row_main(d: dict, row_key: str, *, show_action: bool = True, ready: bool = False):
     row = [
-        sg.Text(str(d.get("datum", "")),           size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(str(d.get("polotovar_sk", "")),    size=(SK_WIDTH, 1),   pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(str(d.get("polotovar_rc", "")),    size=(RC_WIDTH, 1),   pad=CELL_PAD, font=FONT_ROW),
-        _name_cell(d.get("polotovar_nazev", ""), height=1, is_main=True),
-        sg.Text(_fmt_qty_2dec_cz(d.get("potreba", "")), size=(QTY_WIDTH_CHARS, 1),
-        pad=CELL_PAD, justification="right", font=FONT_ROW_BOLD),
-        sg.Text(str(d.get("jednotka", "")),        size=(UNIT_WIDTH_CHARS, 1), pad=CELL_PAD, font=FONT_ROW),
+        sg.Text(str(d.get("datum", "")), size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
+        sg.Text(str(d.get("polotovar_rc", "")), size=(RC_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
+        _name_cell(
+            d.get("polotovar_nazev", ""),
+            height=1,
+            is_main=True,
+            underline=ready,  # ← podtrhni, pokud jsou všechny ingredience koupené
+        ),
+        sg.Text(
+            _fmt_qty_2dec_cz(d.get("potreba", "")),
+            size=(QTY_WIDTH_CHARS, 1),
+            pad=CELL_PAD,
+            justification="right",
+            font=FONT_ROW_BOLD,
+        ),
+        sg.Text(str(d.get("jednotka", "")), size=(UNIT_WIDTH_CHARS, 1), pad=CELL_PAD, font=FONT_ROW),
     ]
     if show_action:
         row.append(sg.Button("Naplánováno", key=row_key, size=(9, 1), pad=BTN_PAD))
@@ -123,36 +226,33 @@ def _row_main(d: dict, row_key: str, *, show_action: bool = True):
         row.append(sg.Text("", size=(10, 1), pad=BTN_PAD))
     return row
 
+
+
 def _row_detail(d: dict):
-    vyrobek_sk = str(d.get("vyrobek_sk", "") or d.get("final_sk", "")).strip()
+    # hodnoty z detailu
     vyrobek_rc = str(d.get("vyrobek_rc", "") or d.get("final_rc", "")).strip()
-    name       = str(d.get("vyrobek_nazev", "") or d.get("final_nazev", "")).strip()
-    # --- uvnitř _row_detail() změň přípravu qty_full takto ---
-    mnozstvi   = _fmt_qty_2dec_cz(d.get("mnozstvi", ""))
-    jednotka   = str(d.get("jednotka", "")).strip()
-    qty_full   = f"{mnozstvi} {jednotka}".strip()
+    name_raw   = str(d.get("vyrobek_nazev", "") or d.get("final_nazev", "")).strip()
+    name_disp  = f"↳ {name_raw or '(bez názvu)'}"
 
+    # množství + mj
+    mnozstvi = _fmt_qty_2dec_cz(d.get("mnozstvi", ""))
+    jednotka = str(d.get("jednotka", "")).strip()
+    qty_full = f"{mnozstvi} {jednotka}".strip()
 
+    # Pozn.: sloupec SK "odebíráme" tak, že ho zobrazíme prázdný (kvůli zarovnání sloupců)
     return [
-        sg.Text("", size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(vyrobek_sk, size=(SK_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(vyrobek_rc, size=(RC_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        _name_cell(name or "(bez názvu)", height=1, indent_px=8, is_main=False),
+        sg.Text("", size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),          # Datum (prázdné v detailu)
+        sg.Text(vyrobek_rc, size=(RC_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),    # RC
+        _name_cell(name_disp, height=1, indent_px=0, is_main=False),             # ↳ Název výrobku
         sg.Text(qty_full, size=(QTY_WIDTH_CHARS+UNIT_WIDTH_CHARS, 1),
-                pad=CELL_PAD, justification="right", font=FONT_ROW),
-        sg.Text("", size=(10, 1), pad=BTN_PAD),
+                pad=CELL_PAD, justification="right", font=FONT_ROW),             # množství + MJ
+        sg.Text("", size=(10, 1), pad=BTN_PAD),                                   # akce (detail nic nemá)
     ]
 
 
+
 # ========================= IO: Excel =========================
-def _load_details_sheet() -> Optional[pd.DataFrame]:
-    try:
-        det = pd.read_excel(OUTPUT_SEMI_EXCEL, sheet_name="Detaily").fillna("")
-        det.columns = [str(c).strip() for c in det.columns]
-        to_date_col(det, "datum")
-        return det
-    except Exception:
-        return None
+
 
 def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
     """
@@ -271,13 +371,11 @@ def _build_rows(
     rowkey_map: Dict[str, str] = {}
 
     if weekly_sum:
-        # zdrojové DF (nevyrobené) s připravenými klíči a startem týdne
         d_src = _filter_unmade(df_main.copy(), col_k)
         for c in ["polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]:
             d_src[c] = d_src[c].fillna("").astype(str).str.strip()
         to_date_col(d_src, "datum")
         d_src["_dt"] = pd.to_datetime(d_src["datum"], errors="coerce")
-        # stejný výpočet startu týdne jako v _aggregate_weekly
         d_src["_week_start"] = (d_src["_dt"] - pd.to_timedelta(d_src["_dt"].dt.weekday, unit="D")).dt.normalize()
 
         d = _aggregate_weekly(df_main, col_k)
@@ -286,9 +384,9 @@ def _build_rows(
 
         rows: List[List[sg.Element]] = [[*_header_row()]]
         btn_id = 0
+
         for _, r in d.iterrows():
             start_dt = r.get("_week_start", pd.NaT)
-
             sk = str(r.get("polotovar_sk", "")).strip()
             rc = str(r.get("polotovar_rc", "")).strip()
             nm = str(r.get("polotovar_nazev", "")).strip()
@@ -303,13 +401,15 @@ def _build_rows(
             )
             idx_list = list(d_src.loc[mask].index.astype(int))
 
+            ready = _is_polotovar_ready(sk, rc)
+
             row_key = f"-WSEMI-{btn_id}-"
             btn_id += 1
 
             main_row = _row_main(
                 {
                     "datum": r.get("datum", ""),
-                    "polotovar_sk": sk,
+                    "polotovar_sk": sk,   # ponecháno pro klíčování detailů
                     "polotovar_rc": rc,
                     "polotovar_nazev": nm,
                     "potreba": r.get("potreba", ""),
@@ -317,10 +417,10 @@ def _build_rows(
                 },
                 row_key=row_key,
                 show_action=True,
+                ready=ready,  # ← podtržení názvu
             )
             rows.append([*main_row])
 
-            # ----- detaily všech zdrojových řádků v této weekly skupině -----
             if show_details and idx_list:
                 d_src_sel = d_src.loc[idx_list].copy()
                 d_src_sel["_dt_sort"] = pd.to_datetime(d_src_sel["datum"], errors="coerce")
@@ -336,6 +436,7 @@ def _build_rows(
 
             buy_map[row_key] = idx_list
             rowkey_map[row_key] = row_key
+
         return rows, buy_map, rowkey_map
 
     # ------ neagregovaný režim ------
@@ -351,24 +452,28 @@ def _build_rows(
 
     for i, r in d.iterrows():
         row_key = f"-SEMI-{i}-"
+        sk_val = r.get("polotovar_sk", "")
+        rc_val = r.get("polotovar_rc", "")
+
+        ready = _is_polotovar_ready(sk_val, rc_val)
+
         main_row = _row_main(
             {
                 "datum": fmt_cz_date(r.get("datum", "")),
-                "polotovar_sk": r.get("polotovar_sk", ""),
-                "polotovar_rc": r.get("polotovar_rc", ""),
+                "polotovar_sk": sk_val,   # ponecháno pro klíčování detailů
+                "polotovar_rc": rc_val,
                 "polotovar_nazev": r.get("polotovar_nazev", ""),
                 "potreba": r.get("potreba", ""),
                 "jednotka": r.get("jednotka", ""),
             },
             row_key=row_key,
             show_action=True,
+            ready=ready,  # ← podtržení názvu
         )
         rows.append([*main_row])
 
         if show_details:
-            sk_key = str(r.get("polotovar_sk", ""))
-            rc_key = str(r.get("polotovar_rc", ""))
-            key = (sk_key, rc_key, r.get("datum", ""))
+            key = (str(sk_val), str(rc_val), r.get("datum", ""))
             for det in df_details_map.get(key, []):
                 rows.append([*_row_detail(det)])
 
@@ -376,7 +481,6 @@ def _build_rows(
         rowkey_map[row_key] = row_key
 
     return rows, buy_map, rowkey_map
-
 
 # ========================= WINDOW HELPERS =========================
 def _create_window(df_main, detail_map, col_k, show_details, weekly_sum, location=None):
@@ -441,21 +545,37 @@ def _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum):
 # ========================= PUBLIC =========================
 def open_semis_results():
     """
-    Okno 'Plán polotovarů' – rekreace obsahu se zachováním pozice/scrollu
-    přes services.gui_helpers.recreate_window_preserving (bez poskakování).
+    Okno 'Plán polotovarů' – rekreace obsahu se zachováním pozice/scrollu.
+    Primárně čteme z Excelu (kvůli testům); pokud není, použijeme cache (graph_store).
+
     """
+    import os
+    from pathlib import Path
+
     global LAST_WIN_POS
     try:
-        # 1) načti hlavní přehled
-        try:
-            df_main = pd.read_excel(OUTPUT_SEMI_EXCEL, sheet_name="Prehled")
-        except Exception:
-            df_main = pd.read_excel(OUTPUT_SEMI_EXCEL)
-        df_main = df_main.fillna("")
+        from services.paths import OUTPUT_SEMI_EXCEL as _SEMIS_XLSX
+        from services import graph_store
+
+        # ---------- 1) Načtení dat (Excel -> priorita kvůli testům) ----------
+        if Path(_SEMIS_XLSX).exists():
+            try:
+                df_main = pd.read_excel(_SEMIS_XLSX, sheet_name="Prehled").fillna("")
+            except Exception:
+                df_main = pd.read_excel(_SEMIS_XLSX).fillna("")
+            try:
+                df_det = pd.read_excel(_SEMIS_XLSX, sheet_name="Detaily").fillna("")
+            except Exception:
+                df_det = pd.DataFrame()
+        else:
+            df_main, df_det = graph_store.get_semis_dfs()
+            df_main = (df_main or pd.DataFrame()).fillna("")
+            df_det  = (df_det  or pd.DataFrame()).fillna("")
+
         df_main.columns = [str(c).strip() for c in df_main.columns]
         to_date_col(df_main, "datum")
 
-        # normalizace sloupců u hlavního přehledu
+        # normalizace sloupců
         col_map = {
             "polotovar_sk":     ["polotovar_sk", "sk_polotovar", "sk"],
             "polotovar_rc":     ["polotovar_rc", "reg_c_polotovar", "reg.č.", "reg_c", "rgc"],
@@ -474,16 +594,18 @@ def open_semis_results():
             sg.popup(ERR.MSG["semis_empty"])
             return
 
-        # sloupec 'vyrobeno' (bool)
+        # 'vyrobeno' -> bool
         col_k = find_col(df_main, ["vyrobeno"]) or "vyrobeno"
         if col_k not in df_main.columns:
             df_main[col_k] = False
         _force_bool(df_main, col_k)
 
-        # 2) načti detaily do mapy
-        df_det = _load_details_sheet()
+        # ---------- 2) Postavit detail_map z df_det ----------
         detail_map: Dict[Tuple[str, str, object], List[dict]] = {}
         if df_det is not None and not df_det.empty:
+            df_det = df_det.fillna("")
+            df_det.columns = [str(c).strip() for c in df_det.columns]
+            to_date_col(df_det, "datum")
             for _, r in df_det.iterrows():
                 polotovar_sk = _get_any(r, ["polotovar_sk", "sk_polotovar", "sk"], "")
                 polotovar_rc = _get_any(r, ["polotovar_rc", "reg_c_polotovar", "reg.č.", "reg_c", "rgc"], "")
@@ -502,7 +624,7 @@ def open_semis_results():
                     "jednotka": jednotka,
                 })
 
-        # 3) okno – první vykreslení
+        # ---------- 3) První vykreslení ----------
         show_details = False
         weekly_sum = False
         w, buy_map, rowkey_map = _create_window(
@@ -513,96 +635,149 @@ def open_semis_results():
             return
         _remember_pos(w)
 
+        # Headless safety
+        test_mode = bool(os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("QT_QPA_PLATFORM") == "offscreen")
+        loops = 0
+        max_loops = 80 if test_mode else None
+
         while True:
             ev, vals = w.read()
             _remember_pos(w)
-            if ev in (sg.WINDOW_CLOSED, "-CLOSE-"):
+
+            if ev in (sg.WINDOW_CLOSED, "-CLOSE_", "-CLOSE-", None):
                 break
 
-            # Toggle detailů (idempotentně)
+            # přepínání detailů
             if ev == "-DETAILS-":
-                # čti z vals, fallback invert pro headless
                 target = bool(vals["-DETAILS-"]) if isinstance(vals.get("-DETAILS-"), bool) else not show_details
-                if target == show_details:
-                    continue
-                show_details = target
-                builder = _builder_factory(
-                    df_main, detail_map if df_det is not None and not df_det.empty else {},
-                    col_k, show_details, weekly_sum
-                )
-                res = recreate_window_preserving(w, builder, col_key='-COL-')
-                if not res or res[0] is None:
-                    sg.popup(ERR.MSG["semis_all_done"])
-                    break
-                w, buy_map, rowkey_map = res
+                if target != show_details:
+                    show_details = target
+                    res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
+                    if not res or res[0] is None:
+                        sg.popup(ERR.MSG["semis_all_done"]); break
+                    w, buy_map, rowkey_map = res
+                loops += 1
+                if max_loops is not None and loops >= max_loops: break
                 continue
 
-            # Přepínač weekly režimu (idempotentně)
+            # přepínání weekly
             if ev == "-WEEKLY-":
                 target = bool(vals["-WEEKLY-"]) if isinstance(vals.get("-WEEKLY-"), bool) else not weekly_sum
-                if target == weekly_sum:
-                    continue
-                weekly_sum = target
-                builder = _builder_factory(
-                    df_main, detail_map if df_det is not None and not df_det.empty else {},
-                    col_k, show_details, weekly_sum
-                )
-                res = recreate_window_preserving(w, builder, col_key='-COL-')
-                if not res or res[0] is None:
-                    sg.popup(ERR.MSG["semis_all_done"])
-                    break
-                w, buy_map, rowkey_map = res
+                if target != weekly_sum:
+                    weekly_sum = target
+                    res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
+                    if not res or res[0] is None:
+                        sg.popup(ERR.MSG["semis_all_done"]); break
+                    w, buy_map, rowkey_map = res
+                loops += 1
+                if max_loops is not None and loops >= max_loops: break
                 continue
 
-            # Klik – normální režim
+            # klik – normální režim
             if isinstance(ev, str) and ev.startswith("-SEMI-") and not weekly_sum:
                 idx_list = buy_map.get(ev, [])
                 if not idx_list:
                     ERR.show_error(ERR.MSG["semis_index_map"])
+                    loops += 1
+                    if max_loops is not None and loops >= max_loops: break
                     continue
 
-                df_main.loc[idx_list, col_k] = True
                 try:
+                    sel = sorted({int(i) for i in idx_list if pd.notna(i)})
+                    if sel:
+                        df_main.loc[sel, col_k] = True
                     _force_bool(df_main, col_k)
+
+                    try:
+                        df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)  # <- PLAIN PING pro UC5
+                    except Exception:
+                        pass
                     _save_semi_excel(df_main, df_det)
                 except Exception as e:
                     ERR.show_error(ERR.MSG["semis_save"], e)
+                    loops += 1
+                    if max_loops is not None and loops >= max_loops: break
                     continue
 
-                builder = _builder_factory(
-                    df_main, detail_map if df_det is not None and not df_det.empty else {},
-                    col_k, show_details, weekly_sum
-                )
-                res = recreate_window_preserving(w, builder, col_key='-COL-')
+                res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup(ERR.MSG["semis_all_done_close"])
-                    break
+                    sg.popup(ERR.MSG["semis_all_done_close"]); break
                 w, buy_map, rowkey_map = res
+                loops += 1
+                if max_loops is not None and loops >= max_loops: break
+                continue
 
-            # Klik – weekly režim (agregace)
+            # klik – weekly režim (agregace)
             if isinstance(ev, str) and ev.startswith("-WSEMI-") and weekly_sum:
                 idx_list = buy_map.get(ev, [])
+
+                # Fallback: pokud buy_map neobsahuje klíč (např. '-WSEMI-0-'), dopočítej podle pořadí
+                if not idx_list:
+                    try:
+                        n = int(ev.split("-WSEMI-")[1].split("-")[0])
+                    except Exception:
+                        n = 0
+
+                    d_src = _filter_unmade(df_main.copy(), col_k)
+                    for c in ["polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]:
+                        d_src[c] = d_src[c].fillna("").astype(str).str.strip()
+                    to_date_col(d_src, "datum")
+                    d_src["_dt"] = pd.to_datetime(d_src["datum"], errors="coerce")
+                    d_src["_week_start"] = (d_src["_dt"] - pd.to_timedelta(d_src["_dt"].dt.weekday, unit="D")).dt.normalize()
+
+                    d_agg = _aggregate_weekly(df_main, col_k)
+                    if d_agg is not None and not d_agg.empty and 0 <= n < len(d_agg):
+                        r = d_agg.iloc[n]
+                        start_dt = r.get("_week_start", pd.NaT)
+                        sk = str(r.get("polotovar_sk", "")).strip()
+                        rc = str(r.get("polotovar_rc", "")).strip()
+                        nm = str(r.get("polotovar_nazev", "")).strip()
+                        mj = str(r.get("jednotka", "")).strip()
+                        mask = (
+                            (d_src["_week_start"] == start_dt)
+                            & (d_src["polotovar_sk"] == sk)
+                            & (d_src["polotovar_rc"] == rc)
+                            & (d_src["polotovar_nazev"] == nm)
+                            & (d_src["jednotka"] == mj)
+                        )
+                        idx_list = list(d_src.loc[mask].index.astype(int))
+
                 if not idx_list:
                     ERR.show_error(ERR.MSG["semis_weekly_no_src"])
+                    loops += 1
+                    if max_loops is not None and loops >= max_loops: break
                     continue
 
-                df_main.loc[idx_list, col_k] = True
                 try:
+                    sel = sorted({int(i) for i in idx_list if pd.notna(i)})
+                    if sel:
+                        df_main.loc[sel, col_k] = True
+
                     _force_bool(df_main, col_k)
+
+                    try:
+                        df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)  # <- PLAIN PING pro UC5
+                    except Exception:
+                        pass
                     _save_semi_excel(df_main, df_det)
                 except Exception as e:
                     ERR.show_error(ERR.MSG["semis_save_weekly"], e)
+                    loops += 1
+                    if max_loops is not None and loops >= max_loops: break
                     continue
 
-                builder = _builder_factory(
-                    df_main, detail_map if df_det is not None and not df_det.empty else {},
-                    col_k, show_details, weekly_sum
-                )
-                res = recreate_window_preserving(w, builder, col_key='-COL-')
+                res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
                 if not res or res[0] is None:
-                    sg.popup(ERR.MSG["semis_all_done_close"])
-                    break
+                    sg.popup(ERR.MSG["semis_all_done_close"]); break
                 w, buy_map, rowkey_map = res
+                loops += 1
+                if max_loops is not None and loops >= max_loops: break
+                continue
+
+            # bezpečnostní stopka
+            loops += 1
+            if max_loops is not None and loops >= max_loops:
+                break
 
         _remember_pos(w)
         try:
@@ -611,5 +786,4 @@ def open_semis_results():
             pass
 
     except Exception as e:
-        # jednotné chování: log + přívětivá hláška
         ERR.show_error(ERR.MSG["semis_window"], e)

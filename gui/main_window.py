@@ -3,21 +3,17 @@ from contextlib import suppress
 import sys
 import PySimpleGUIQt as sg
 
-import main as core  # compute_plan(), compute_plan_semifinished()
-from services.excel_service import ensure_output_excel
+from services import error_messages as ERR
 from gui.results_window import open_results
 from gui.results_semis_window import open_semis_results
-from services import error_messages as ERR
+
+# graf – načíst při startu a přidat RELOAD
+from services import graph_store
 
 APP_TITLE   = "FineGusto"
-WINDOW_SIZE = (760, 280)
+WINDOW_SIZE = (880, 280)
 
 def _setup_global_exception_hook():
-    """
-    Neodchycené výjimky:
-      - detailní traceback do konzole,
-      - popup jen pokud to prostředí dovolí (ne v testech/headless).
-    """
     import traceback
     def _hook(exctype, value, tb):
         try:
@@ -25,7 +21,6 @@ def _setup_global_exception_hook():
             traceback.print_exception(exctype, value, tb, file=sys.stderr)
         except Exception:
             pass
-        # Přátelská hláška – popup jen pokud smíme
         if ERR.should_show_popups():
             try:
                 sg.popup_error(ERR.MSG.get("unhandled_exception", "Došlo k neočekávané chybě."))
@@ -42,6 +37,7 @@ def _build_main_window():
         [[
             sg.Button("nákup ingrediencí", key="-RUN-ING-", size=(22, 2)),
             sg.Button("plán polotovarů",   key="-RUN-SEMI-", size=(22, 2)),
+            sg.Button("Načíst znovu",      key="-RELOAD-", size=(18, 2)),
             sg.Button("Konec",             key="-EXIT-", size=(14, 2)),
         ]],
         element_justification='center', pad=(0, 0)
@@ -51,6 +47,13 @@ def _build_main_window():
 
 def run():
     _setup_global_exception_hook()
+
+    # Graf se načte JEN při startu
+    try:
+        graph_store.init_on_startup()
+    except Exception as e:
+        ERR.show_error("Chyba při inicializaci grafu.", e)
+
     window = _build_main_window()
 
     try:
@@ -58,7 +61,6 @@ def run():
             try:
                 ev, vals = window.read()
             except Exception as e:
-                # UC12: vždy něco pošli na stderr (sanitační kontrola)
                 print("[ERROR] Chyba při čtení události okna", file=sys.stderr, flush=True)
                 ERR.show_error(ERR.MSG["read_event"], e)
                 break
@@ -75,19 +77,24 @@ def run():
                         q.clear()
                 break
 
+            if ev == "-RELOAD-":
+                try:
+                    graph_store.reload_all()
+                    sg.popup("Data znovu načtena.")
+                except Exception as e:
+                    ERR.show_error("Chyba při znovunačtení dat.", e)
+                continue
+
             if ev == "-RUN-ING-":
                 try:
-                    df = core.compute_plan()
-                    ensure_output_excel(df)
-                    open_results()
+                    open_results()       # projekce hotové z init/reload
                 except Exception as e:
                     ERR.show_error(ERR.MSG["compute_plan"], e)
                     continue
 
             if ev == "-RUN-SEMI-":
                 try:
-                    core.compute_plan_semifinished()
-                    open_semis_results()
+                    open_semis_results() # projekce hotové z init/reload
                 except Exception as e:
                     ERR.show_error(ERR.MSG["compute_semis"], e)
                     continue

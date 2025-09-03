@@ -200,7 +200,6 @@ def test_open_results_clicks_buy_and_saves(monkeypatch):
 
     def fake_create(df_full, col_k, agg_flag, location=None):
         # použijeme originální builder, ale okno nahradíme FakeWindow
-        
         w, buy_map, rowkey_map = orig_create(df_full, col_k, agg_flag, location=location)
         nonlocal created_buy_map
         created_buy_map = (buy_map or {}).copy()
@@ -261,50 +260,23 @@ class _WMFake:
 
 
 def test_main_window_run_triggers_compute_and_open(monkeypatch):
-    # 1) fake compute_plan – vrátí mini dataframe
-    def fake_compute_plan():
-        return pd.DataFrame(
-            [
-                {
-                    "datum": "2025-02-01",
-                    "ingredience_sk": "400",
-                    "ingredience_rc": "11",
-                    "nazev": "paprika",
-                    "potreba": 2,
-                    "jednotka": "kg",
-                }
-            ]
-        )
-
-    # 2) zachytíme volání ensure_output_excel a open_results
-    called = {"ensure": False, "open": False}
-
-    def fake_ensure_output_excel(df):
-        # Zapíše do TEST_OUT (ne do ostrého), abychom ověřili IO
-        es.ensure_output_excel_generic(df, TEST_OUT, bool_col="koupeno")
-        called["ensure"] = True
-
-    def fake_open_results():
-        called["open"] = True
-
-    # 3) fake hlavní okno (PySimpleGUIQt)
+    """
+    V nové architektuře klik na 'nákup ingrediencí' jen otevře výsledkové okno
+    (výpočty/projekce probíhají při startu nebo přes 'Načíst znovu').
+    Test tedy ověřuje pouze to, že se opravdu otevře okno výsledků.
+    """
+    # 1) fake hlavní okno (PySimpleGUIQt)
     monkeypatch.setattr(mw.sg, "Window", lambda *a, **k: _WMFake())
 
-    # 4) injektujeme fake výpočty/akce
-    monkeypatch.setattr(mw.core, "compute_plan", fake_compute_plan)
-    monkeypatch.setattr(mw, "ensure_output_excel", fake_ensure_output_excel)
-    monkeypatch.setattr(mw, "open_results", fake_open_results)
+    # 2) zachytíme volání open_results
+    called = {"open": False}
+    monkeypatch.setattr(mw, "open_results", lambda: called.__setitem__("open", True))
 
-    # 5) popupy pryč
+    # 3) vypnout popupy
     monkeypatch.setattr(mw.sg, "popup_error", lambda *a, **k: None)
 
-    # 6) spustit smyčku
+    # 4) spustit smyčku
     mw.run()
 
-    # 7) ověření
-    assert called["ensure"] is True, "Po kliknutí se měl uložit výsledek do Excelu."
+    # 5) ověření
     assert called["open"] is True, "Po kliknutí se mělo otevřít okno výsledků."
-    assert TEST_OUT.exists(), "Soubor s výsledkem měl vzniknout."
-    out = pd.read_excel(TEST_OUT)
-    assert "koupeno" in out.columns
-    assert out.loc[0, "koupeno"] in (False, 0), "Nové řádky mají defaultně nekoupeno."
