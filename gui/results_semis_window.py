@@ -103,7 +103,6 @@ def _name_cell(text: str, *, height: int, indent_px: int = 0, is_main: bool = Fa
 def _header_row():
     return [
         sg.Text("Datum",   size=(DATE_WIDTH, 1), font=FONT_HEADER, pad=CELL_PAD),
-        sg.Text("SK",      size=(SK_WIDTH, 1),   font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Reg.č.",  size=(RC_WIDTH, 1),   font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Název",   size=(NAME_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Množství", size=(QTY_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD, justification="right"),
@@ -114,7 +113,6 @@ def _header_row():
 def _row_main(d: dict, row_key: str, *, show_action: bool = True):
     row = [
         sg.Text(str(d.get("datum", "")),           size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(str(d.get("polotovar_sk", "")),    size=(SK_WIDTH, 1),   pad=CELL_PAD, font=FONT_ROW),
         sg.Text(str(d.get("polotovar_rc", "")),    size=(RC_WIDTH, 1),   pad=CELL_PAD, font=FONT_ROW),
         _name_cell(d.get("polotovar_nazev", ""), height=1, is_main=True),
         sg.Text(_fmt_qty_2dec_cz(d.get("potreba", "")), size=(QTY_WIDTH_CHARS, 1),
@@ -126,26 +124,27 @@ def _row_main(d: dict, row_key: str, *, show_action: bool = True):
     else:
         row.append(sg.Text("", size=(10, 1), pad=BTN_PAD))
     return row
-
 def _row_detail(d: dict):
-    vyrobek_sk = str(d.get("vyrobek_sk", "") or d.get("final_sk", "")).strip()
+    # hodnoty z detailu
     vyrobek_rc = str(d.get("vyrobek_rc", "") or d.get("final_rc", "")).strip()
-    name       = str(d.get("vyrobek_nazev", "") or d.get("final_nazev", "")).strip()
-    # --- uvnitř _row_detail() změň přípravu qty_full takto ---
-    mnozstvi   = _fmt_qty_2dec_cz(d.get("mnozstvi", ""))
-    jednotka   = str(d.get("jednotka", "")).strip()
-    qty_full   = f"{mnozstvi} {jednotka}".strip()
+    name_raw   = str(d.get("vyrobek_nazev", "") or d.get("final_nazev", "")).strip()
+    name_disp  = f"↳ {name_raw or '(bez názvu)'}"
 
+    # množství + mj
+    mnozstvi = _fmt_qty_2dec_cz(d.get("mnozstvi", ""))
+    jednotka = str(d.get("jednotka", "")).strip()
+    qty_full = f"{mnozstvi} {jednotka}".strip()
 
+    # Pozn.: sloupec SK "odebíráme" tak, že ho zobrazíme prázdný (kvůli zarovnání sloupců)
     return [
-        sg.Text("", size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(vyrobek_sk, size=(SK_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Text(vyrobek_rc, size=(RC_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
-        _name_cell(name or "(bez názvu)", height=1, indent_px=8, is_main=False),
+        sg.Text("", size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),          # Datum (prázdné v detailu)
+        sg.Text(vyrobek_rc, size=(RC_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),    # RC
+        _name_cell(name_disp, height=1, indent_px=0, is_main=False),             # ↳ Název výrobku
         sg.Text(qty_full, size=(QTY_WIDTH_CHARS+UNIT_WIDTH_CHARS, 1),
-                pad=CELL_PAD, justification="right", font=FONT_ROW),
-        sg.Text("", size=(10, 1), pad=BTN_PAD),
+                pad=CELL_PAD, justification="right", font=FONT_ROW),             # množství + MJ
+        sg.Text("", size=(10, 1), pad=BTN_PAD),                                   # akce (detail nic nemá)
     ]
+
 
 
 # ========================= IO: Excel =========================
