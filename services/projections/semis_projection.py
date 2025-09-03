@@ -21,18 +21,35 @@ def _cat_from_node_or_nid(node, nid: NodeId) -> int | None:
     return _first3_int(sk_val)
 
 
+def _fallback_name(name: str, sk, rc) -> str:
+    n = (name or "").strip()
+    return n if n else f"{sk}-{rc}"
+
+
 def _collect_semis_300(g: Graph) -> List[dict]:
     """
-    Projdi všechny požadavky (demands) na finálech a nasbírej
-    požadovaná množství pro polotovary (SK 300).
-    Do polotovarů NEzapočítáváme hotové výrobky (400) ani listy (nákup).
+    Projde všechny požadavky (FINÁLy 400) a nasbírá polotovary (SK 300).
+    K polotovaru doplní i PŮVODNÍ VÝROBEK (400): vyrobek_sk/rc/nazev,
+    aby je mělo UI v detailu k dispozici.
     """
     rows: List[dict] = []
 
     for d in g.demands:
         datum = d.key[0] if isinstance(d.key, (tuple, list)) and len(d.key) > 0 else None
-        stack: List[Tuple[NodeId, float]] = [(d.node, d.qty)]
 
+        # identita a jméno kořenového výrobku (400)
+        root_final_nid = d.node
+        root_final = g.nodes.get(root_final_nid)
+        if not root_final:
+            continue
+        try:
+            vf_sk, vf_rc = root_final_nid  # (400, rc)
+        except Exception:
+            continue
+        vf_name = _fallback_name(getattr(root_final, "name", ""), vf_sk, vf_rc)
+
+        # rozpad
+        stack: List[Tuple[NodeId, float]] = [(d.node, d.qty)]
         while stack:
             nid, qty = stack.pop()
             node = g.nodes.get(nid)
@@ -41,26 +58,28 @@ def _collect_semis_300(g: Graph) -> List[dict]:
 
             cat = _cat_from_node_or_nid(node, nid)
 
-            # Polotovar (300) – EVIDUJ a NEJDI dál (cílová úroveň plánování)
             if cat == 300:
                 sk, rc = nid
                 rows.append({
                     "datum": datum,
-                    "polotovar_sk": sk,  # <<< DOPLNĚNO: testy/Excel očekávají SK
+                    "polotovar_sk": sk,
                     "polotovar_rc": rc,
-                    "polotovar_nazev": getattr(node, "name", "") or f"{sk}-{rc}",
+                    "polotovar_nazev": _fallback_name(getattr(node, "name", ""), sk, rc),
                     "potreba": qty,
                     "jednotka": getattr(node, "unit", "") or "",
                     "vyrobeno": bool(getattr(node, "produced", False)),
+                    # >>> pro detail hotového výrobku:
+                    "vyrobek_sk": vf_sk,
+                    "vyrobek_rc": vf_rc,
+                    "vyrobek_nazev": vf_name,
                 })
                 continue
 
-            # Leaf (nákup) do polotovarů nepatří
-            has_edges = bool(getattr(node, "edges", None))
-            if not has_edges:
+            # Leaf (nákup) – nepatří do polotovarů
+            if not getattr(node, "edges", None):
                 continue
 
-            # Jinak rozpad dále (typicky 400 → 300/leaf)
+            # jinak pokračuj v rozpadu
             for e in getattr(node, "edges", []) or []:
                 per_unit = float(e.per_unit_qty or 0.0)
                 if per_unit == 0.0:
@@ -72,24 +91,25 @@ def _collect_semis_300(g: Graph) -> List[dict]:
 
 def to_semis_dfs(g: Graph) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Vrací dva DataFrame:
-      - df_pre: přehled polotovarů (SK 300) po datu
-      - df_det: detaily (stejná granularita jako řádky přehledu)
-
-    Sloupce (přehled):
-      datum | polotovar_sk | polotovar_rc | polotovar_nazev | potreba | jednotka | vyrobeno
-    Detaily v této projekci nezachycují původ (vyrobek_*), to dodají jiné části – tady držíme stejný základ.
+    Vrací:
+      - df_pre (přehled SK 300 po datu):
+        datum | polotovar_sk | polotovar_rc | polotovar_nazev | potreba | jednotka | vyrobeno
+      - df_det (detaily s vazbou na VÝROBEK 400):
+        datum | polotovar_sk | polotovar_rc | vyrobek_sk | vyrobek_rc | vyrobek_nazev | mnozstvi | jednotka
     """
     rows = _collect_semis_300(g)
 
-    base_cols = ["datum", "polotovar_sk", "polotovar_rc", "polotovar_nazev", "potreba", "jednotka", "vyrobeno"]
+    pre_cols = ["datum", "polotovar_sk", "polotovar_rc", "polotovar_nazev", "potreba", "jednotka", "vyrobeno"]
+    det_cols = ["datum", "polotovar_sk", "polotovar_rc",
+                "vyrobek_sk", "vyrobek_rc", "vyrobek_nazev",
+                "mnozstvi", "jednotka"]
 
     if not rows:
-        return pd.DataFrame(columns=base_cols), pd.DataFrame(columns=base_cols)
+        return pd.DataFrame(columns=pre_cols), pd.DataFrame(columns=det_cols)
 
     df = pd.DataFrame(rows)
 
-    # agregace přehledu – čistě potřeba, ostatní klíčová pole v groupby
+    # ---------- Přehled ----------
     df["_pot"] = pd.to_numeric(df["potreba"], errors="coerce").fillna(0.0)
     df_pre = (
         df.groupby(
@@ -97,15 +117,17 @@ def to_semis_dfs(g: Graph) -> tuple[pd.DataFrame, pd.DataFrame]:
             as_index=False
         )["_pot"].sum().rename(columns={"_pot": "potreba"})
     )
-    # 'vyrobeno' není agregovatelné → vezmeme OR přes skupinu (někde může být True)
-    df_vyr = (
-        df.groupby(["datum", "polotovar_sk", "polotovar_rc"], as_index=False)["vyrobeno"]
-          .max()
-    )
+    df_vyr = df.groupby(["datum", "polotovar_sk", "polotovar_rc"], as_index=False)["vyrobeno"].max()
     df_pre = df_pre.merge(df_vyr, on=["datum", "polotovar_sk", "polotovar_rc"], how="left")
     df_pre["vyrobeno"] = df_pre["vyrobeno"].fillna(False).astype(bool)
+    df_pre = df_pre[pre_cols]
 
-    # detaily – v této projekci stejné pole (bez vyrobek_*); necháváme řádek per (datum, rc)
-    df_det = df[base_cols].copy()
+    # ---------- Detaily (pro UI podřádky – výrobek 400) ----------
+    df_det = df.copy()
+    df_det["mnozstvi"] = df_det["potreba"]
+    for c in det_cols:
+        if c not in df_det.columns:
+            df_det[c] = ""
+    df_det = df_det[det_cols]
 
-    return df_pre[base_cols], df_det[base_cols]
+    return df_pre, df_det

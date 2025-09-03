@@ -132,14 +132,14 @@ def _normalize_det(df: pd.DataFrame) -> pd.DataFrame:
     d["mnozstvi"] = pd.to_numeric(d["mnozstvi"], errors="coerce").fillna(0.0).astype(float)
     _normalize_keys_inplace(d)
     return d[DETAIL_COLS]
-
-
 def _merge_preserve_vyrobeno(df_new: pd.DataFrame, df_old: Optional[pd.DataFrame]) -> pd.DataFrame:
     """
     Zachovej 'vyrobeno=True' ze starého souboru (stejné klíče),
     ale pokud se množství výrazně změní (> 50 %), resetuj na False.
 
-    Tím se potká UC8 (drobná změna -> True drží) i UC9 (velká změna -> reset).
+    DŮLEŽITÉ: Staré sešity mohly mít jiný název sloupce pro název polotovaru
+    (např. 'nazev' místo 'polotovar_nazev'). Tady proto starý DF
+    znormalizujeme na kanonické názvy klíčů použitých v df_new.
     """
     if df_old is None or df_old.empty:
         return df_new.copy()
@@ -148,31 +148,64 @@ def _merge_preserve_vyrobeno(df_new: pd.DataFrame, df_old: Optional[pd.DataFrame
     old.columns = [str(c).strip() for c in old.columns]
     to_date_col(old, "datum")
 
+    # --- normalizace aliasů ve STARÉ tabulce (aby měly stejné klíče jako df_new) ---
+    # Převod aliasů -> kanonické názvy (stačí pro klíčové sloupce)
+    alias_map = {
+        "polotovar_nazev": [
+            "polotovar_nazev", "nazev", "název",
+            "polotovar", "nazev_polotovar", "nazev_polotovaru", "název polotovaru"
+        ],
+        "jednotka": [
+            "jednotka", "mj", "MJ", "MJ evidence", "mj evidence"
+        ],
+        "polotovar_sk": ["polotovar_sk", "sk_polotovar", "sk", "sk polotovar"],
+        "polotovar_rc": ["polotovar_rc", "reg_c_polotovar", "reg_c", "regcislo", "regc", "reg.č.", "reg č."],
+    }
+    for canon, cands in alias_map.items():
+        col = find_col(old, cands)
+        if col and col != canon:
+            old[canon] = old[col]
+
+    # Sloupce vyrobeno/potreba na korektní typy
     if "vyrobeno" not in old.columns:
         old["vyrobeno"] = False
     old["vyrobeno"] = old["vyrobeno"].map(to_bool_cell_excel).astype(bool)
     old["potreba"] = pd.to_numeric(old.get("potreba", 0.0), errors="coerce").fillna(0.0).astype(float)
+
+    # Klíče sjednotíme na ty, které používá df_new (kanon)
+    key_cols = ["datum", "polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]
+
+    # Doplň případně chybějící klíčové sloupce do 'old', aby šel výběr bez KeyError
+    for c in key_cols:
+        if c not in old.columns:
+            old[c] = ""
+
+    # sjednocení klíčových hodnot na stabilní stringy (čisté klíče)
     _normalize_keys_inplace(old)
 
-    key_cols = ["datum", "polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]
-    key_cols = [c for c in key_cols if c in df_new.columns]
+    # --- merge: do starých vyber jen klíče + staré vyrobeno/potreba ---
+    old_sub = old[key_cols + ["vyrobeno", "potreba"]].rename(
+        columns={"vyrobeno": "vyrobeno_old", "potreba": "potreba_old"}
+    )
 
-    old_sub = old[key_cols + ["vyrobeno", "potreba"]].rename(columns={"vyrobeno": "vyrobeno_old", "potreba": "potreba_old"})
     merged = pd.merge(df_new, old_sub, on=key_cols, how="left")
 
-    # výpočet relativní změny
+    # držení starého True: OR přes původní vyrobeno + pravidlo 50 %
+    merged["vyrobeno"] = merged.get("vyrobeno", False).map(to_bool_cell_excel).astype(bool)
+
     new_q = pd.to_numeric(merged.get("potreba", 0.0), errors="coerce").fillna(0.0)
     old_q = pd.to_numeric(merged.get("potreba_old", 0.0), errors="coerce").fillna(0.0)
-    denom = old_q.abs().replace(0.0, 1.0)  # aby nebylo dělení nulou
+    denom = old_q.abs().replace(0.0, 1.0)
     rel = (new_q - old_q).abs() / denom
+    keep_mask = rel <= 0.5
 
-    keep_mask = rel <= 0.5  # ≤50 % → držet True
-    merged["vyrobeno"] = (merged["vyrobeno"].astype(bool)) | (keep_mask & merged.get("vyrobeno_old", False).fillna(False))
-
+    merged["vyrobeno"] = merged["vyrobeno"] | (keep_mask & merged.get("vyrobeno_old", False).fillna(False))
     merged["vyrobeno"] = merged["vyrobeno"].map(to_bool_cell_excel).astype(bool)
+
     for c in ("vyrobeno_old", "potreba_old"):
         if c in merged.columns:
             merged.drop(columns=[c], inplace=True)
+
     return merged
 
 

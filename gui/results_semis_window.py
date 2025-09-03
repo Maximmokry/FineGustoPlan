@@ -149,14 +149,7 @@ def _row_detail(d: dict):
 
 
 # ========================= IO: Excel =========================
-def _load_details_sheet() -> Optional[pd.DataFrame]:
-    try:
-        det = pd.read_excel(OUTPUT_SEMI_EXCEL, sheet_name="Detaily").fillna("")
-        det.columns = [str(c).strip() for c in det.columns]
-        to_date_col(det, "datum")
-        return det
-    except Exception:
-        return None
+
 
 def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
     """

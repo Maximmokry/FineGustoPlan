@@ -1,5 +1,6 @@
 # services/compute_common.py
 from __future__ import annotations
+import os
 import math
 import pandas as pd
 from datetime import date
@@ -8,6 +9,13 @@ from typing import Iterable
 from services.data_utils import to_date_col, clean_columns, to_bool_cell_excel
 from services.paths import OUTPUT_EXCEL
 
+_DEBUG_NAMES = os.environ.get("FG_DEBUG_NAMES") == "1"
+def _d(msg: str):
+    if _DEBUG_NAMES:
+        try:
+            print(f"[NAMES][recepty] {msg}", flush=True)
+        except Exception:
+            pass
 # ---------------------------- Tolerantní hledání sloupců ----------------------------
 
 def _normalize_col_key(s: str) -> str:
@@ -100,20 +108,30 @@ def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
     c_reg = find_col(df, ["Reg. č..1", "Reg. č.1", "Reg.č..1", "reg. č..1", "reg. č.1", "Reg c 1", "Reg. c.1"])
     c_sk  = find_col(df, ["SK.1", "SK1", "sk.1", "sk1", "SK 1"])
 
-    # ⬇️ NOVÉ – názvy
-    p_nm  = find_col(df, ["Název", "Nazev"])                  # rodič (finál)
-    c_nm  = find_col(df, ["Název 1.1", "Nazev 1.1", "Název", "Nazev"])
+    # (důležité) – názvy rodiče (400) a dítěte (300/leaf)
+    p_nm  = find_col(df, [
+        "Název", "Nazev", "Název výrobku", "Nazev vyrobku", "Nazev výrobku", "Název vyrobku",
+        "Výrobek", "Vyrobek", "Produkt", "Produkt název", "Produkt nazev",
+        "Název položky", "Nazev polozky", "Název finálu", "Název finalu", "Nazev finalu", "Popis výrobku"
+    ])
+    c_nm  = find_col(df, [
+        "Název 1.1", "Nazev 1.1", "Název 1", "Nazev 1",
+        "Název polotovaru", "Nazev polotovaru", "Polotovar",
+        "Název komponenty", "Nazev komponenty",
+        "Název součásti", "Nazev soucasti",
+        "Název", "Nazev", "Popis", "Popis položky",
+    ])
+
+    if _DEBUG_NAMES:
+        _d(f"Sloupce DF: {list(df.columns)}")
+        _d(f"p_reg={p_reg}, p_sk={p_sk}, c_reg={c_reg}, c_sk={c_sk}")
+        _d(f"p_nm={p_nm}, c_nm={c_nm}")
 
     qty   = find_col(df, ["Množství", "Mnozstvi", "množství", "mnozstvi", "qty"])
     unit  = find_col(df, ["MJ evidence", "MJ", "Jednotka", "jednotka"])
 
-    for need, nm in [
-        ("rodič Reg. č.", p_reg),
-        ("rodič SK", p_sk),
-        ("komponenta Reg. č..1", c_reg),
-        ("komponenta SK.1", c_sk),
-        ("množství", qty),
-    ]:
+    for need, nm in [("rodič Reg. č.", p_reg), ("rodič SK", p_sk), ("komponenta Reg. č..1", c_reg),
+                     ("komponenta SK.1", c_sk), ("množství", qty)]:
         if nm is None:
             raise KeyError(f"Nebyl nalezen sloupec pro {need}")
 
@@ -122,12 +140,19 @@ def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
     df["_C_REG"]   = df[c_reg].map(_as_key_txt)
     df["_C_SK"]    = df[c_sk].map(_as_key_txt)
 
-    # ⬇️ NOVÉ – jména (bezpečně, strip, prázdné když není)
     df["_P_NAME"]  = df[p_nm].astype(str).str.strip() if p_nm is not None else ""
     df["_C_NAME"]  = df[c_nm].astype(str).str.strip() if c_nm is not None else ""
 
     df["_QTY"]     = pd.to_numeric(df[qty], errors="coerce").fillna(0.0)
     df["_UNIT"]    = (df[unit].astype(str).str.strip() if unit is not None else "")
+
+    if _DEBUG_NAMES:
+        p_nonempty = int((df["_P_NAME"].astype(str).str.strip() != "").sum()) if "_P_NAME" in df else 0
+        c_nonempty = int((df["_C_NAME"].astype(str).str.strip() != "").sum()) if "_C_NAME" in df else 0
+        _d(f"Počty neprázdných jmen: parent={p_nonempty}, child={c_nonempty}")
+        _d("Ukázky parent jmen: " + ", ".join(df["_P_NAME"].astype(str).head(5).tolist()))
+        _d("Ukázky child  jmen: " + ", ".join(df["_C_NAME"].astype(str).head(5).tolist()))
+
     return df
 
 
