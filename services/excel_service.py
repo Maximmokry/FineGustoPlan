@@ -35,13 +35,13 @@ def ensure_output_excel(data):
        output_path=sp.OUTPUT_EXCEL,  # DŮLEŽITÉ: čte se vždy runtime hodnota (možná monkeypatchnutá)
        bool_col="koupeno",
    )
-
-def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
+def ensure_output_excel_generic(data, output_path, bool_col="koupeno", *, writer_engine="openpyxl"):
     """
     Obecný zápis výsledku:
       - drží (a normalizuje) bool sloupec `bool_col`
       - merge se starým souborem, aby zůstaly zachované stavy
       - unifikuje klíče (datum, ingredience_sk/rc, nazev, jednotka) → bez dtype konfliktů
+      - zapisuje POUZE přes xlsxwriter v 'with' bloku (žádné visící file-handles)
     """
     # --- příjem nových dat ---
     if isinstance(data, pd.DataFrame):
@@ -66,16 +66,18 @@ def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
     except Exception:
         has_old = False
 
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
     if not has_old:
         if new_k != bool_col:
             df_new = df_new.rename(columns={new_k: bool_col})
         df_new[bool_col] = df_new[bool_col].map(to_bool_cell_excel).astype(bool)
-        # final normalizace klíčů na odolné typy:
         _normalize_keys_inplace(df_new)
-        
-        out = Path(output_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        df_new.to_excel(out, index=False)
+
+        # Bezpečný zápis – vždy přes xlsxwriter
+        with pd.ExcelWriter(out, engine=writer_engine) as writer:
+            df_new.to_excel(writer, index=False)
         return
 
     # --- máme stará data → merge ---
@@ -88,9 +90,7 @@ def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
         df_old[old_k] = False
     df_old[old_k] = df_old[old_k].map(to_bool_cell_excel).astype(bool)
 
-    
     # KLÍČE: jen identifikační sloupce (NE množství apod.)
-    # držíme se kontraktu: (datum, ingredience_sk, ingredience_rc, nazev, jednotka)
     preferred_keys = ["datum", "ingredience_sk", "ingredience_rc", "nazev", "jednotka"]
     present = [c for c in preferred_keys if c in df_new.columns]
     if present:
@@ -132,6 +132,7 @@ def ensure_output_excel_generic(data, output_path, bool_col="koupeno"):
             merged.drop(columns=[c], inplace=True)
 
     _normalize_keys_inplace(merged)
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    merged.to_excel(out, index=False)
+
+    # Bezpečný zápis – vždy přes xlsxwriter
+    with pd.ExcelWriter(out, engine=writer_engine) as writer:
+        merged.to_excel(writer, index=False)

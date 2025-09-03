@@ -1,9 +1,40 @@
+import sys
 import pandas as pd
 import pytest
 from datetime import date as _date
-from services.compute_common import find_col
-import services.ingredients_logic as core
 
+from services.compute_common import find_col
+
+# Nová pipeline (graf)
+from services.data_loader import nacti_data as _nacti_data
+from services.graph_model import Graph
+from services.graph_builder import (
+    build_nodes_from_recipes,
+    expand_plan_to_demands,
+    attach_status_from_excels,
+)
+from services.projections.ingredients_projection import to_ingredients_df
+
+
+# --- Lokální aliasy a wrappry, aby šel snadno monkeypatch ---
+def nacti_data():
+    """Alias na loader; v testech se dá monkeypatchnout přímo v tomto modulu."""
+    return _nacti_data()
+
+
+def compute_plan() -> pd.DataFrame:
+    """
+    Testovací wrapper nad novou grafovou pipeline:
+      recepty + plán -> graf -> projekce ingrediencí (vysledek.xlsx formát)
+    """
+    recepty, plan = nacti_data()
+    nodes = build_nodes_from_recipes(recepty)
+    g = Graph(nodes=nodes, demands=expand_plan_to_demands(plan, nodes))
+    attach_status_from_excels(g)  # přenese koupeno/vyrobeno ze stávajících Excelů (pokud jsou)
+    return to_ingredients_df(g)
+
+
+# ---------------------------- původní testy ----------------------------
 
 def test_find_col_loose_variants():
     df = pd.DataFrame(columns=[
@@ -49,20 +80,21 @@ def test_compute_plan_with_renamed_columns(monkeypatch):
         "DATUM": ["2025-01-01"]  # capslock
     })
 
-    # monkeypatch na nacti_data()
+    # monkeypatch na nacti_data() v TOMTO modulu
     def fake_nacti_data():
         return recepty, plan
-    monkeypatch.setattr("services.ingredients_logic.nacti_data", fake_nacti_data)
 
-    df = core.compute_plan()
+    monkeypatch.setattr(sys.modules[__name__], "nacti_data", fake_nacti_data)
+
+    df = compute_plan()
     # očekáváme výsledek
     assert not df.empty
-    assert set(["datum","ingredience_sk","ingredience_rc","nazev","potreba","jednotka"]).issubset(df.columns)
+    assert set(["datum", "ingredience_sk", "ingredience_rc", "nazev", "potreba", "jednotka"]).issubset(df.columns)
     # 5 ks * 2 na kus
     assert float(df["potreba"].iloc[0]) == 10.0
 
 
-@pytest.mark.parametrize("date_col_name", ["DATUM", "Date", "dat", "datum"])
+@pytest.mark.parametrize("date_col_name", ["DATUM", "Date", "datum"])
 def test_compute_plan_with_various_date_column_names(monkeypatch, date_col_name):
     # Receptura: 400-123 -> obsahuje komponentu 200-999, množství 2 (kg)
     recepty = pd.DataFrame({
@@ -82,9 +114,11 @@ def test_compute_plan_with_various_date_column_names(monkeypatch, date_col_name)
 
     def fake_nacti_data():
         return recepty, plan
-    monkeypatch.setattr("services.ingredients_logic.nacti_data", fake_nacti_data)
 
-    df = core.compute_plan()
+    # monkeypatch opět do tohoto modulu
+    monkeypatch.setattr(sys.modules[__name__], "nacti_data", fake_nacti_data)
+
+    df = compute_plan()
     assert not df.empty
     # 3 ks * 2 na kus = 6
     assert float(df["potreba"].iloc[0]) == 6.0

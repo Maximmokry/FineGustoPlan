@@ -91,12 +91,6 @@ def _series_or_blank(df: pd.DataFrame, col: str) -> pd.Series:
 # ---------------------------- Receptury (normalizace) ----------------------------
 
 def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Přidá jednotné pomocné sloupce:
-      - _P_REG, _P_SK      (rodič – výrobek)
-      - _C_REG, _C_SK      (komponenta)
-      - _C_NAME, _QTY, _UNIT
-    """
     df = df.copy()
     clean_columns(df)
 
@@ -105,7 +99,11 @@ def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
 
     c_reg = find_col(df, ["Reg. č..1", "Reg. č.1", "Reg.č..1", "reg. č..1", "reg. č.1", "Reg c 1", "Reg. c.1"])
     c_sk  = find_col(df, ["SK.1", "SK1", "sk.1", "sk1", "SK 1"])
-    c_nm  = find_col(df, ["Název 1.1", "Nazev 1.1", "název 1.1", "nazev 1.1", "Název", "Nazev"])
+
+    # ⬇️ NOVÉ – názvy
+    p_nm  = find_col(df, ["Název", "Nazev"])                  # rodič (finál)
+    c_nm  = find_col(df, ["Název 1.1", "Nazev 1.1", "Název", "Nazev"])
+
     qty   = find_col(df, ["Množství", "Mnozstvi", "množství", "mnozstvi", "qty"])
     unit  = find_col(df, ["MJ evidence", "MJ", "Jednotka", "jednotka"])
 
@@ -119,14 +117,19 @@ def _prepare_recepty(df: pd.DataFrame) -> pd.DataFrame:
         if nm is None:
             raise KeyError(f"Nebyl nalezen sloupec pro {need}")
 
-    df["_P_REG"]  = df[p_reg].map(_as_key_txt)
-    df["_P_SK"]   = df[p_sk].map(_as_key_txt)
-    df["_C_REG"]  = df[c_reg].map(_as_key_txt)
-    df["_C_SK"]   = df[c_sk].map(_as_key_txt)
-    df["_C_NAME"] = df[c_nm] if c_nm is not None else ""
-    df["_QTY"]    = pd.to_numeric(df[qty], errors="coerce").fillna(0.0)
-    df["_UNIT"]   = df[unit] if unit is not None else ""
+    df["_P_REG"]   = df[p_reg].map(_as_key_txt)
+    df["_P_SK"]    = df[p_sk].map(_as_key_txt)
+    df["_C_REG"]   = df[c_reg].map(_as_key_txt)
+    df["_C_SK"]    = df[c_sk].map(_as_key_txt)
+
+    # ⬇️ NOVÉ – jména (bezpečně, strip, prázdné když není)
+    df["_P_NAME"]  = df[p_nm].astype(str).str.strip() if p_nm is not None else ""
+    df["_C_NAME"]  = df[c_nm].astype(str).str.strip() if c_nm is not None else ""
+
+    df["_QTY"]     = pd.to_numeric(df[qty], errors="coerce").fillna(0.0)
+    df["_UNIT"]    = (df[unit].astype(str).str.strip() if unit is not None else "")
     return df
+
 
 # ---------------------------- Pomoc pro GUI „ready“ ----------------------------
 

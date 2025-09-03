@@ -2,11 +2,19 @@
 import sys
 from pathlib import Path
 import pytest
+import os
+# Qt bez displeje
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+# náš vlastní příznak pro GUI kód
+os.environ.setdefault("PL_TEST_MODE", "1")
 
 # Přidej kořen projektu do sys.path (pro jistotu na Windows)
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
 
 
 
