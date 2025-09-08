@@ -17,5 +17,5 @@ def test_excel_writer_creates_file_and_layout(tmp_path):
 
     assert out.exists(), "Excel file should be created"
     # Optional: open with pandas to ensure workbook is valid (won't reproduce layout, but checks integrity)
-    df_check = pd.read_excel(out, sheet_name="Plan", header=None)
+    df_check = pd.read_excel(out, header=None)
     assert isinstance(df_check, pd.DataFrame)

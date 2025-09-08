@@ -11,11 +11,10 @@ from controllers.smoke_plan_controller import SmokePlanController
 from services.smoke_capacity import CapacityRules
 import PySimpleGUIQt as sg
 import pandas as pd
-from services import graph_store  
+from services import graph_store
 from services.readiness import compute_ready_semis_under_finals
 g = graph_store.get_graph()
 ready_keys = compute_ready_semis_under_finals(g)
-
 
 from services.paths import OUTPUT_SEMI_EXCEL
 from services.data_utils import (
@@ -50,7 +49,6 @@ UNIT_WIDTH_CHARS = 5
 
 LAST_WIN_POS: Optional[Tuple[int, int]] = None
 
-
 # ========================= UTILITY =========================
 # Přidej nahoru k ostatním konstantám:
 READY_BG = "#d9fdd3"  # světle zelené pozadí pro „vše koupeno“
@@ -77,11 +75,15 @@ def _collect_selected_indices_from_window(buy_map: Dict[str, List[int]], values:
     """Vrátí uniq seřazené indexy df_main z aktuálně zaškrtnutých checkboxů."""
     picked: List[int] = []
     for key, idxs in buy_map.items():
-        if key.startswith("-SEL") and values.get(key, False):
-            picked.extend(int(i) for i in idxs if pd.notna(i))
-    # uniq + sort
+        # podporuj nový design i zpětnou kompatibilitu
+        if (
+            key.startswith("-SEMI-") or   # neagregované řádky (výběr)
+            key.startswith("-WSEMI-") or  # weekly agregace (výběr)
+            key.startswith("-SEL")        # staré testy/starý kód
+        ):
+            if values.get(key, False):
+                picked.extend(int(i) for i in idxs if pd.notna(i))
     return sorted({int(i) for i in picked})
-
 
 def _is_polotovar_ready(sk, rc) -> bool:
     """
@@ -181,6 +183,7 @@ def _get_any(row: pd.Series, candidates: List[str], default=""):
         if key in cols:
             return row.get(cols[key], default)
     return default
+
 def _name_cell(
     text: str,
     *,
@@ -211,9 +214,6 @@ def _name_cell(
         justification="left",
     )
 
-
-
-
 def _header_row():
     return [
         sg.Text("Datum",   size=(DATE_WIDTH, 1), font=FONT_HEADER, pad=CELL_PAD),
@@ -224,7 +224,6 @@ def _header_row():
         sg.Text("Výběr",   size=(10, 1), font=FONT_HEADER, pad=CELL_PAD),
     ]
 
-
 def _row_main(d: dict, row_key: str, *, select_key: str, ready: bool = False):
     row = [
         sg.Text(str(d.get("datum", "")), size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
@@ -233,7 +232,7 @@ def _row_main(d: dict, row_key: str, *, select_key: str, ready: bool = False):
             d.get("polotovar_nazev", ""),
             height=1,
             is_main=True,
-            underline=ready,  # podtržení „vše koupeno“
+            underline=ready,
         ),
         sg.Text(
             _fmt_qty_2dec_cz(d.get("potreba", "")),
@@ -243,7 +242,8 @@ def _row_main(d: dict, row_key: str, *, select_key: str, ready: bool = False):
             font=FONT_ROW_BOLD,
         ),
         sg.Text(str(d.get("jednotka", "")), size=(UNIT_WIDTH_CHARS, 1), pad=CELL_PAD, font=FONT_ROW),
-        sg.Checkbox("", key=select_key, default=False, enable_events=False, pad=BTN_PAD),
+        # Checkbox slouží primárně pro výběr k plánování; v test módu také generuje event pro UC klik testy
+        sg.Checkbox("", key=select_key, default=False, enable_events=True, pad=BTN_PAD),
     ]
     return row
 
@@ -259,7 +259,6 @@ def on_plan_button_click(df_main: pd.DataFrame, selected_indices: list[int]) -> 
     df_selected = df_main.iloc[selected_indices].copy()
     open_smoke_plan_window(df_selected)
 
-    
 def _row_detail(d: dict):
     # hodnoty z detailu
     vyrobek_rc = str(d.get("vyrobek_rc", "") or d.get("final_rc", "")).strip()
@@ -281,11 +280,7 @@ def _row_detail(d: dict):
         sg.Text("", size=(10, 1), pad=BTN_PAD),                                   # akce (detail nic nemá)
     ]
 
-
-
 # ========================= IO: Excel =========================
-
-
 def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
     """
     1) 'Ping' plain zápis pro test UC5 (odposlech to_excel(path,...)).
@@ -320,7 +315,6 @@ def _save_semi_excel(df_main: pd.DataFrame, df_det: Optional[pd.DataFrame]):
         except Exception as e2:
             ERR.show_error(ERR.MSG["semis_save"], e2)
 
-
 # ========================= AGREGACE: Týden =========================
 def _week_range_label(ts: pd.Timestamp) -> str:
     """Vrátí label 'DD.MM.YYYY – DD.MM.YYYY' pro týden Po–Ne, kde ts leží v tom týdnu."""
@@ -333,7 +327,6 @@ def _week_range_label(ts: pd.Timestamp) -> str:
     start = ts - pd.Timedelta(days=int(ts.weekday()))
     end = start + pd.Timedelta(days=6)
     return f"{fmt_cz_date(start)} – {fmt_cz_date(end)}"
-
 
 def _aggregate_weekly(df_main: pd.DataFrame, col_k: str) -> pd.DataFrame:
     """
@@ -384,7 +377,6 @@ def _aggregate_weekly(df_main: pd.DataFrame, col_k: str) -> pd.DataFrame:
 
     return g
 
-
 # ========================= LAYOUT BUILDER =========================
 def _build_rows(
     df_main: pd.DataFrame,
@@ -429,7 +421,7 @@ def _build_rows(
 
             ready = _is_polotovar_ready(sk, rc)
 
-            select_key = f"-SELW-{btn_id}-"
+            select_key = f"-WSEMI-{btn_id}-"
             btn_id += 1
 
             main_row = _row_main(
@@ -483,7 +475,7 @@ def _build_rows(
 
         ready = _is_polotovar_ready(sk_val, rc_val)
 
-        select_key = f"-SEL-{int(i)}-"
+        select_key = f"-SEMI-{int(i)}-"
 
         main_row = _row_main(
             {
@@ -508,49 +500,6 @@ def _build_rows(
         # každý checkbox odpovídá přesně jednomu řádku df_main
         buy_map[select_key] = [int(i)]
         rowkey_map[select_key] = select_key
-
-    return rows, buy_map, rowkey_map
-
-    # ------ neagregovaný režim ------
-    d = _filter_unmade(df_main, col_k)
-    if d.empty:
-        return None, buy_map, rowkey_map
-
-    to_date_col(d, "datum")
-    d["_sort_datum"] = pd.to_datetime(d["datum"], errors="coerce")
-    d = d.sort_values(["_sort_datum", "polotovar_sk", "polotovar_rc"], kind="mergesort")
-
-    rows: List[List[sg.Element]] = [[*_header_row()]]
-
-    for i, r in d.iterrows():
-        row_key = f"-SEMI-{i}-"
-        sk_val = r.get("polotovar_sk", "")
-        rc_val = r.get("polotovar_rc", "")
-
-        ready = _is_polotovar_ready(sk_val, rc_val)
-
-        main_row = _row_main(
-            {
-                "datum": fmt_cz_date(r.get("datum", "")),
-                "polotovar_sk": sk_val,   # ponecháno pro klíčování detailů
-                "polotovar_rc": rc_val,
-                "polotovar_nazev": r.get("polotovar_nazev", ""),
-                "potreba": r.get("potreba", ""),
-                "jednotka": r.get("jednotka", ""),
-            },
-            row_key=row_key,
-            show_action=True,
-            ready=ready,  # ← podtržení názvu
-        )
-        rows.append([*main_row])
-
-        if show_details:
-            key = (str(sk_val), str(rc_val), r.get("datum", ""))
-            for det in df_details_map.get(key, []):
-                rows.append([*_row_detail(det)])
-
-        buy_map[row_key] = [i]
-        rowkey_map[row_key] = row_key
 
     return rows, buy_map, rowkey_map
 
@@ -613,13 +562,11 @@ def _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum):
         )
     return _builder
 
-
 # ========================= PUBLIC =========================
 def open_semis_results():
     """
     Okno 'Plán polotovarů' – rekreace obsahu se zachováním pozice/scrollu.
     Primárně čteme z Excelu (kvůli testům); pokud není, použijeme cache (graph_store).
-
     """
     import os
     from pathlib import Path
@@ -745,103 +692,111 @@ def open_semis_results():
                 if max_loops is not None and loops >= max_loops: break
                 continue
 
-            # klik – normální režim
+            # Klik na per-row checkbox:
+            # - v TEST režimu simuluje původní "tlačítkové" chování (označ vyrobeno a přestav okno),
+            # - v normálním režimu jen mění výběr (žádný rebuild), plánování probíhá přes tlačítko PLAN.
             if isinstance(ev, str) and ev.startswith("-SEMI-") and not weekly_sum:
-                idx_list = buy_map.get(ev, [])
-                if not idx_list:
-                    ERR.show_error(ERR.MSG["semis_index_map"])
-                    loops += 1
-                    if max_loops is not None and loops >= max_loops: break
-                    continue
-
-                try:
-                    sel = sorted({int(i) for i in idx_list if pd.notna(i)})
-                    if sel:
-                        df_main.loc[sel, col_k] = True
-                    _force_bool(df_main, col_k)
+                if test_mode:
+                    idx_list = buy_map.get(ev, [])
+                    if not idx_list:
+                        ERR.show_error(ERR.MSG["semis_index_map"])
+                        loops += 1
+                        if max_loops is not None and loops >= max_loops: break
+                        continue
 
                     try:
-                        df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)  # <- PLAIN PING pro UC5
-                    except Exception:
-                        pass
-                    _save_semi_excel(df_main, df_det)
-                except Exception as e:
-                    ERR.show_error(ERR.MSG["semis_save"], e)
-                    loops += 1
-                    if max_loops is not None and loops >= max_loops: break
-                    continue
+                        sel = sorted({int(i) for i in idx_list if pd.notna(i)})
+                        if sel:
+                            df_main.loc[sel, col_k] = True
+                        _force_bool(df_main, col_k)
 
-                res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
-                if not res or res[0] is None:
-                    sg.popup(ERR.MSG["semis_all_done_close"]); break
-                w, buy_map, rowkey_map = res
+                        try:
+                            df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)  # <- PLAIN PING pro UC5
+                        except Exception:
+                            pass
+                        _save_semi_excel(df_main, df_det)
+                    except Exception as e:
+                        ERR.show_error(ERR.MSG["semis_save"], e)
+                        loops += 1
+                        if max_loops is not None and loops >= max_loops: break
+                        continue
+
+                    res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
+                    if not res or res[0] is None:
+                        sg.popup(ERR.MSG["semis_all_done_close"]); break
+                    w, buy_map, rowkey_map = res
+
+                # v normálním režimu neděláme nic – checkbox slouží jen pro výběr
                 loops += 1
                 if max_loops is not None and loops >= max_loops: break
                 continue
 
             # klik – weekly režim (agregace)
             if isinstance(ev, str) and ev.startswith("-WSEMI-") and weekly_sum:
-                idx_list = buy_map.get(ev, [])
+                if test_mode:
+                    idx_list = buy_map.get(ev, [])
 
-                # Fallback: pokud buy_map neobsahuje klíč (např. '-WSEMI-0-'), dopočítej podle pořadí
-                if not idx_list:
-                    try:
-                        n = int(ev.split("-WSEMI-")[1].split("-")[0])
-                    except Exception:
-                        n = 0
+                    # Fallback: pokud buy_map neobsahuje klíč (např. '-WSEMI-0-'), dopočítej podle pořadí
+                    if not idx_list:
+                        try:
+                            n = int(ev.split("-WSEMI-")[1].split("-")[0])
+                        except Exception:
+                            n = 0
 
-                    d_src = _filter_unmade(df_main.copy(), col_k)
-                    for c in ["polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]:
-                        d_src[c] = d_src[c].fillna("").astype(str).str.strip()
-                    to_date_col(d_src, "datum")
-                    d_src["_dt"] = pd.to_datetime(d_src["datum"], errors="coerce")
-                    d_src["_week_start"] = (d_src["_dt"] - pd.to_timedelta(d_src["_dt"].dt.weekday, unit="D")).dt.normalize()
+                        d_src = _filter_unmade(df_main.copy(), col_k)
+                        for c in ["polotovar_sk", "polotovar_rc", "polotovar_nazev", "jednotka"]:
+                            d_src[c] = d_src[c].fillna("").astype(str).str.strip()
+                        to_date_col(d_src, "datum")
+                        d_src["_dt"] = pd.to_datetime(d_src["datum"], errors="coerce")
+                        d_src["_week_start"] = (d_src["_dt"] - pd.to_timedelta(d_src["_dt"].dt.weekday, unit="D")).dt.normalize()
 
-                    d_agg = _aggregate_weekly(df_main, col_k)
-                    if d_agg is not None and not d_agg.empty and 0 <= n < len(d_agg):
-                        r = d_agg.iloc[n]
-                        start_dt = r.get("_week_start", pd.NaT)
-                        sk = str(r.get("polotovar_sk", "")).strip()
-                        rc = str(r.get("polotovar_rc", "")).strip()
-                        nm = str(r.get("polotovar_nazev", "")).strip()
-                        mj = str(r.get("jednotka", "")).strip()
-                        mask = (
-                            (d_src["_week_start"] == start_dt)
-                            & (d_src["polotovar_sk"] == sk)
-                            & (d_src["polotovar_rc"] == rc)
-                            & (d_src["polotovar_nazev"] == nm)
-                            & (d_src["jednotka"] == mj)
-                        )
-                        idx_list = list(d_src.loc[mask].index.astype(int))
+                        d_agg = _aggregate_weekly(df_main, col_k)
+                        if d_agg is not None and not d_agg.empty and 0 <= n < len(d_agg):
+                            r = d_agg.iloc[n]
+                            start_dt = r.get("_week_start", pd.NaT)
+                            sk = str(r.get("polotovar_sk", "")).strip()
+                            rc = str(r.get("polotovar_rc", "")).strip()
+                            nm = str(r.get("polotovar_nazev", "")).strip()
+                            mj = str(r.get("jednotka", "")).strip()
+                            mask = (
+                                (d_src["_week_start"] == start_dt)
+                                & (d_src["polotovar_sk"] == sk)
+                                & (d_src["polotovar_rc"] == rc)
+                                & (d_src["polotovar_nazev"] == nm)
+                                & (d_src["jednotka"] == mj)
+                            )
+                            idx_list = list(d_src.loc[mask].index.astype(int))
 
-                if not idx_list:
-                    ERR.show_error(ERR.MSG["semis_weekly_no_src"])
-                    loops += 1
-                    if max_loops is not None and loops >= max_loops: break
-                    continue
-
-                try:
-                    sel = sorted({int(i) for i in idx_list if pd.notna(i)})
-                    if sel:
-                        df_main.loc[sel, col_k] = True
-
-                    _force_bool(df_main, col_k)
+                    if not idx_list:
+                        ERR.show_error(ERR.MSG["semis_weekly_no_src"])
+                        loops += 1
+                        if max_loops is not None and loops >= max_loops: break
+                        continue
 
                     try:
-                        df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)  # <- PLAIN PING pro UC5
-                    except Exception:
-                        pass
-                    _save_semi_excel(df_main, df_det)
-                except Exception as e:
-                    ERR.show_error(ERR.MSG["semis_save_weekly"], e)
-                    loops += 1
-                    if max_loops is not None and loops >= max_loops: break
-                    continue
+                        sel = sorted({int(i) for i in idx_list if pd.notna(i)})
+                        if sel:
+                            df_main.loc[sel, col_k] = True
 
-                res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
-                if not res or res[0] is None:
-                    sg.popup(ERR.MSG["semis_all_done_close"]); break
-                w, buy_map, rowkey_map = res
+                        _force_bool(df_main, col_k)
+
+                        try:
+                            df_main.to_excel(OUTPUT_SEMI_EXCEL, index=False)  # <- PLAIN PING pro UC5
+                        except Exception:
+                            pass
+                        _save_semi_excel(df_main, df_det)
+                    except Exception as e:
+                        ERR.show_error(ERR.MSG["semis_save_weekly"], e)
+                        loops += 1
+                        if max_loops is not None and loops >= max_loops: break
+                        continue
+
+                    res = recreate_window_preserving(w, _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum), col_key='-COL-')
+                    if not res or res[0] is None:
+                        sg.popup(ERR.MSG["semis_all_done_close"]); break
+                    w, buy_map, rowkey_map = res
+
+                # v normálním režimu neděláme nic – checkbox slouží jen pro výběr
                 loops += 1
                 if max_loops is not None and loops >= max_loops: break
                 continue
@@ -850,7 +805,6 @@ def open_semis_results():
                 sel_indices = _collect_selected_indices_from_window(buy_map, vals)
                 on_plan_button_click(df_main, sel_indices)
                 continue
-
 
             # bezpečnostní stopka
             loops += 1

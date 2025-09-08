@@ -89,14 +89,33 @@ def _safe_set(ws: Worksheet, row: int, col: int, value) -> None:
         pass
 
 def _display_name(rw) -> str:
-    rc = str(rw.get("rc"))
-    name = str(rw.get("polotovar_nazev"))
+    rc_val = rw.get("rc")
+    name_val = rw.get("polotovar_nazev")
+
+    # Bezpečné "očištění" hodnot tak, aby se nezobrazovalo "nan", "<NA>", "None", apod.
+    def _clean(v) -> str:
+        if v is None:
+            return ""
+        try:
+            # pokud je k dispozici pandas, korektně detekuj NaN/NA
+            if pd.isna(v):
+                return ""
+        except Exception:
+            pass
+        s = str(v).strip()
+        if s.lower() in {"", "nan", "<na>", "nat", "none", "null"}:
+            return ""
+        return s
+
+    rc = _clean(rc_val)
+    name = _clean(name_val)
+
     if rc and name:
         return f"400-{rc} - {name}"
-    elif rc:
+    if rc:
         return f"400-{rc}"
-    else:
-        return name
+    return name
+
     
 def write_smoke_plan_excel(path: str,
                            plan_df: pd.DataFrame,
