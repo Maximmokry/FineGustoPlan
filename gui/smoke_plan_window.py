@@ -7,10 +7,14 @@ from datetime import date, timedelta
 from typing import Dict, List, Tuple, Optional
 from math import floor
 from services import graph_store
+# doplnit importy služeb (nad open_smoke_plan_window)
+from services.semi_excel_service import ensure_output_semis_excel
+from services.smoke_sync_service import apply_plan_flags
 
 import PySimpleGUIQt as sg
 import pandas as pd
 
+# ==== NOVÉ IMPORTY PRO EXCEL SERVICE ====
 from services.smoke_excel_service import write_smoke_plan_excel
 from services.smoke_paths import smoke_plan_excel_path
 
@@ -38,6 +42,7 @@ HDR_COLORS = ["#FFF2A8", "#D1F5D3", "#D1E6FF", "#FFE6CC"]  # 1..4
 # agresivně malé pady
 PAD_ELEM = (0, 0)
 PAD_CELL = (0, 0)
+BTN_PAD  = ((4, 0), (0, 0))  # sjednoceno se zbytkem projektu
 
 # Vzhled / kompaktnost
 FONT_BASE   = ("Any", 8)
@@ -473,6 +478,7 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
     # Globální odebrání implicitních rozestupů
     sg.set_options(element_padding=(0, 0))
 
+    sg.theme("SystemDefault")
 
     try: scr_w, scr_h = sg.Window.get_screen_size()
     except Exception: scr_w, scr_h = (1600, 900)
@@ -492,10 +498,10 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
     gap_total = GAP_PX * (SMOKERS - 1)
     container_w = ((block_px * SMOKERS) + gap_total) * 3  # zachováno
 
+    # ----- Hlavicka bez tlačítek (sjednocení se zbytkem projektu) -----
     header = [
         [sg.Text("Plán uzení (Po–So)", font=FONT_TITLE, background_color=BG, pad=PAD_ELEM)],
-        [sg.Text(f"Týden od (pondělí): {week_monday:%d.%m.%Y}", background_color=BG, font=FONT_BASE, pad=PAD_ELEM),
-         sg.Button("Uložit", key="SAVE", pad=PAD_ELEM), sg.Button("Zavřít", key="CLOSE", pad=PAD_ELEM)],
+        [sg.Text(f"Týden od (pondělí): {week_monday:%d.%m.%Y}", background_color=BG, font=FONT_BASE, pad=PAD_ELEM)],
     ]
 
     def _make_day_tab_content(d: int) -> List[List[sg.Element]]:
@@ -522,7 +528,14 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
 
     tabs = sg.TabGroup([day_tabs], key="-TABGROUP-", background_color=BG, pad=PAD_ELEM, enable_events=False)
 
-    layout = [*header, [tabs]]
+    # ----- Kontrolní lišta dole (tlačítka) -----
+    controls = [
+        sg.Button("Uložit", key="SAVE", size=(14, 1), pad=BTN_PAD),
+        sg.Button("Zavřít", key="-CLOSE-", size=(14, 1), pad=((12, 0), 0)),
+    ]
+    controls_col = sg.Column([controls], element_justification='center', pad=(0, 6), background_color=BG)
+
+    layout = [*header, [tabs], [controls_col]]
 
     window = sg.Window(
         "Plán uzení (Po–So)",
@@ -573,7 +586,7 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
 
     while True:
         event, values = window.read()
-        if event in (sg.WIN_CLOSED, "CLOSE"): break
+        if event in (sg.WIN_CLOSED, "-CLOSE-", "CLOSE"): break
 
         if isinstance(event, tuple) and event and event[0] == "GRAB":
             _d, _s, _r = event[1], event[2], event[3]
@@ -651,8 +664,6 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
                 )
             except Exception as e:
                 _popup_ok_safe(f"Plán se uložil, ale označení vyrobeno selhalo:\n{e}", "Upozornění")
-
-            continue
 
 
     try: window.close()
