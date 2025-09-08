@@ -31,6 +31,13 @@ def _base_results_dir() -> Path:
     return p
 
 
+def smoke_template_path() -> Path:
+    
+    base = _base_results_dir()
+    return base /  "data" / "plan_udiren_template.xlsx"
+    
+    
+
 def plan_uzeni_dir() -> Path:
     base = _base_results_dir()
     target = base / "plan uzeni"

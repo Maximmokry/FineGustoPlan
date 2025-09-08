@@ -1,165 +1,203 @@
-# -*- coding: utf-8 -*-
-"""
-Export plánu uzení do Excelu přesně podle šablony (1 list, Po–So, 4 udírny, 7 řádků).
-
-Vstupem je DataFrame z `SmokePlan.to_dataframe()` nebo ekvivalent se sloupci:
-  - datum (datetime.date nebo pandas Timestamp)
-  - den (text "Pondělí".."Sobota")
-  - udirna (1..4)
-  - pozice (1..7)
-  - polotovar_id, polotovar_nazev, mnozstvi, jednotka, poznamka
-
-Výstupní rozložení kopíruje šablonu: pro každý den hlavička se jménem dne a datem,
-řádek s titulky čtyř udíren a pod nimi 7 řádků s kolonkami:
-  "Pořadové číslo", "Druhy výrobku", "Poznámka", "Dávka", "Směna"
-
-Pozn.: Druhý list se NEvytváří.
-"""
 from __future__ import annotations
+from datetime import date, timedelta
+from typing import Optional, List, Tuple
 
-from datetime import date
-from typing import Optional
-
+import os
+import unicodedata
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
 
-try:
-    import xlsxwriter  # noqa: F401
-except Exception:
-    xlsxwriter = None  # bude použito přes pandas.ExcelWriter(engine="xlsxwriter")
-
-CZECH_WEEKDAYS = [
-    "Pondělí",
-    "Úterý",
-    "Středa",
-    "Čtvrtek",
-    "Pátek",
-    "Sobota",
-]
-
-HEADER_LABELS = ["Pořadové číslo", "Druhy výrobku", "Poznámka", "Dávka", "Směna"]
-BLOCK_COLS = len(HEADER_LABELS)  # 5 sloupců na jednu udírnu
-SMOKERS = 4
+BLOCK_COLS = 5                 # Pořadí, Druh, Poznámka, Dávka, Směna
 ROWS_PER_SMOKER = 7
+WEEKDAYS_7 = ["Pondělí","Úterý","Středa","Čtvrtek","Pátek","Sobota","Neděle"]
 
+# ---------- util: bezpečné porovnání textu ----------
+def _norm(s) -> str:
+    if s is None:
+        return ""
+    s = str(s).strip()
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+    s = " ".join(s.split()).lower()
+    return s
 
-def _ensure_datetime(d):
-    if isinstance(d, pd.Timestamp):
-        return d.to_pydatetime()
-    return d
+def _is_header_label(v) -> bool:
+    # přijme "Pořadové číslo", "poradove cislo", s mezerou na konci apod.
+    return _norm(v).startswith("poradove cislo")
 
+def _fmt_cz_date(d: date) -> str:
+    return f"{d.day:02d}.{d.month:02d}.{d.year}"
+
+# ---------- robustní výběr listu ----------
+def _pick_worksheet(tpl_path: str, sheet_name: Optional[str]) -> Worksheet:
+    wb = load_workbook(tpl_path, data_only=True, read_only=False)
+
+    # 1) jméno listu, pokud je zadáno a existuje
+    if sheet_name:
+        try:
+            ws = wb[sheet_name]
+            if isinstance(ws, Worksheet):
+                return ws
+        except KeyError:
+            pass
+
+    # 2) první viditelný pracovní list
+    for ws in getattr(wb, "worksheets", []):
+        if getattr(ws, "sheet_state", "visible") == "visible":
+            return ws
+
+    # 3) jakýkoli pracovní list
+    if getattr(wb, "worksheets", []):
+        return wb.worksheets[0]
+
+    # 4) nic nenalezeno
+    names = list(getattr(wb, "sheetnames", []))
+    raise ValueError(f"V šabloně se nepodařilo najít žádný pracovní list. Dostupné listy: {names or '— žádné —'}")
+
+# ---------- autodetekce layoutu (počet udíren + řádky dní) ----------
+def _detect_layout(ws: Worksheet) -> Tuple[int, List[int]]:
+    """
+    Vrátí (smokers, header_rows).
+    smokers … počet bloků po 5 sloupcích (>=1)
+    header_rows … řádky, kde začínají hlavičky (jeden řádek na den)
+    """
+    header_rows: List[int] = []
+    smokers = 0
+    max_row = ws.max_row or 200
+    for r in range(1, max_row + 1):
+        # počítej kolik bloků (1 + k*5) na řádku začíná "Pořadové číslo"
+        count = 0
+        for k in range(1, 20):  # bezpečný strop
+            col = 1 + (k - 1) * BLOCK_COLS
+            if _is_header_label(ws.cell(r, col).value):
+                count += 1
+            else:
+                break
+        if count > 0:
+            header_rows.append(r)
+            smokers = max(smokers, count)
+    if smokers == 0 or not header_rows:
+        raise ValueError("V šabloně jsem nenašel řádek s hlavičkami ('Pořadové číslo' v blocích).")
+    return smokers, header_rows
+
+# ---------- bezpečné zapsání (ignoruje merged read-only) ----------
+def _safe_set(ws: Worksheet, row: int, col: int, value) -> None:
+    try:
+        ws.cell(row, col).value = value
+    except AttributeError:
+        # MergedCell je read-only (není to levý-horní roh spojení) → přeskoč
+        pass
+
+def _display_name(rw) -> str:
+    rc = str(rw.get("rc"))
+    name = str(rw.get("polotovar_nazev"))
+    if rc and name:
+        return f"400-{rc} - {name}"
+    elif rc:
+        return f"400-{rc}"
+    else:
+        return name
+    
 def write_smoke_plan_excel(path: str,
                            plan_df: pd.DataFrame,
                            week_monday: Optional[date] = None,
-                           sheet_name: str = "Plan") -> None:
-    if plan_df.empty:
-        plan_df = _empty_plan_dataframe(week_monday)
-
-    cols_needed = [
-        "datum", "den", "udirna", "pozice",
-        "polotovar_id", "polotovar_nazev", "mnozstvi", "jednotka", "poznamka", "shift",
-    ]
-    for c in cols_needed:
-        if c not in plan_df.columns:
-            plan_df[c] = pd.NA
+                           sheet_name: Optional[str] = None,
+                           template_path: Optional[str] = None) -> None:
+    # ---- vstupní DF: striktně DataFrame + doplněné sloupce ----
+    if not isinstance(plan_df, pd.DataFrame):
+        raise TypeError("plan_df must be a pandas DataFrame")
 
     df = plan_df.copy()
-    df["datum"] = pd.to_datetime(df["datum"]).dt.date
+    for c in ["datum","udirna","pozice","rc","polotovar_nazev","mnozstvi","jednotka","davka","shift","poznamka"]:
+        if c not in df.columns:
+            df[c] = pd.NA
+    df["datum"] = pd.to_datetime(df["datum"], errors="coerce").dt.date
 
     if week_monday is None:
-        if df["datum"].notna().any():
-            week_monday = min(d for d in df["datum"] if d is not None)
-        else:
-            week_monday = date.today()
+        valid_dates = [d for d in df["datum"] if d is not None]
+        week_monday = (min(valid_dates) if valid_dates else date.today())
 
-    df["_day_idx"] = (pd.to_datetime(df["datum"]) - pd.Timestamp(week_monday)).dt.days
-    df.sort_values(["_day_idx", "udirna", "pozice"], inplace=True, kind="mergesort")
+    # ---- načti šablonu + vyber list ----
+    from services.smoke_paths import smoke_template_path
+    tpl = template_path or str(smoke_template_path())
+    if not os.path.exists(tpl):
+        raise FileNotFoundError(f"Šablona nenalezena: {tpl}")
+    ws = _pick_worksheet(tpl, sheet_name)
 
-    with pd.ExcelWriter(path, engine="xlsxwriter") as writer:
-        workbook = writer.book
-        worksheet = workbook.add_worksheet(sheet_name)
+    # ---- auto-detekce: počet udíren a řádky dnů ----
+    smokers_in_template, header_rows = _detect_layout(ws)
+    # počet dnů – vezmeme, kolik bloků je v šabloně (obvykle 6 nebo 7)
+    day_count = min(len(header_rows), len(WEEKDAYS_7))
+    header_rows = header_rows[:day_count]
 
-        CZECH_WEEKDAYS = ["Pondělí","Úterý","Středa","Čtvrtek","Pátek","Sobota"]
-        HEADER_LABELS = ["Pořadové číslo","Druhy výrobku","Poznámka","Dávka","Směna"]
-        BLOCK_COLS = len(HEADER_LABELS)
-        SMOKERS = 4
-        ROWS_PER_SMOKER = 7
+    # ---- vyčisti data + nastav nadpisy dnů ----
+    for day_idx, hdr in enumerate(header_rows):
+        title_row = max(1, hdr - 4)
+        day_date = week_monday + timedelta(days=day_idx)
+        _safe_set(ws, title_row, 1, f"{WEEKDAYS_7[day_idx]} {_fmt_cz_date(day_date)}")
 
-        fmt_day_title = workbook.add_format({"bold": True, "font_size": 12})
-        fmt_ud_title  = workbook.add_format({"bold": True, "align": "center"})
-        fmt_header    = workbook.add_format({"bold": True, "bg_color": "#F2F2F2", "border": 1})
-        fmt_cell      = workbook.add_format({"border": 1})
-        fmt_center    = workbook.add_format({"border": 1, "align": "center"})
+        for s in range(smokers_in_template):
+            start = 1 + s * BLOCK_COLS
+            name_c, note_c, dose_c, = start + 1, start + 2, start + 3
+            for i in range(1, ROWS_PER_SMOKER + 1):
+                rr = hdr + i
+                _safe_set(ws, rr, name_c, "")
+                _safe_set(ws, rr, note_c, "")   # vždy prázdné
+                _safe_set(ws, rr, dose_c, "")
+                # SHIFT NEPÍŠEME (ve vzoru je často vertikálně sloučený) → zůstane prázdný
 
-        col_widths = [12, 28, 24, 10, 10]
-        row_cursor = 0
-        def _s(val):
-            try:
-                import pandas as pd  # jistota dostupnosti v rozsahu
-                if pd.isna(val):
-                    return ""
-            except Exception:
-                pass
-            return "" if val is None else str(val)
+    # ---- zápis dat (ignorujeme udírny/pozice, které v šabloně nejsou) ----
+    df["_udirna"] = pd.to_numeric(df["udirna"], errors="coerce").fillna(0).astype(int)
+    df["_pozice"] = pd.to_numeric(df["pozice"], errors="coerce").fillna(0).astype(int)
 
-        for day_offset, day_name in enumerate(CZECH_WEEKDAYS):
-            day_date = pd.Timestamp(week_monday) + pd.Timedelta(days=day_offset)
-            day_rows = df[df["_day_idx"] == day_offset]
+    def _safe_str(val) -> str:
+        try:
+            if pd.isna(val):
+                return ""
+        except Exception:
+            pass
+        return "" if val is None else str(val)
 
-            worksheet.write(row_cursor, 0, f"{day_name} {day_date.date()}", fmt_day_title)
-            row_cursor += 1
+        # --- nahraď tuto funkci (už bez fallbacku na množství) ---
+    def _dose_from_row(rw) -> str:
+        return _safe_str(rw.get("davka"))
 
-            for s in range(SMOKERS):
-                block_start_col = s * BLOCK_COLS
-                worksheet.write(row_cursor, block_start_col, f"Udírna číslo {s+1}.", fmt_ud_title)
-                for c in range(1, BLOCK_COLS):
-                    worksheet.write(row_cursor, block_start_col + c, "", fmt_ud_title)
-            row_cursor += 1
-
-            for s in range(SMOKERS):
-                block_start_col = s * BLOCK_COLS
-                for c, label in enumerate(HEADER_LABELS):
-                    worksheet.write(row_cursor, block_start_col + c, label, fmt_header)
-                    worksheet.set_column(block_start_col + c, block_start_col + c, col_widths[c])
-            row_cursor += 1
-
-            for r in range(ROWS_PER_SMOKER):
-                for s in range(SMOKERS):
-                    block_start_col = s * BLOCK_COLS
-                    worksheet.write(row_cursor, block_start_col + 0, r + 1, fmt_center)
-
-                    rec = day_rows[(day_rows["udirna"] == (s + 1)) & (day_rows["pozice"] == (r + 1))]
-                    name = note = dose = shift = ""
-                    if not rec.empty:
-                        row = rec.iloc[0]
-                        name = _s(row.get("polotovar_nazev"))
-                        note = _s(row.get("poznamka"))
-                        unit = _s(row.get("jednotka"))
-                        qty  = row.get("mnozstvi")
-                        if pd.notna(qty):
-                            dose = f"{qty} {unit}".strip()
-                        shift = _s(row.get("shift"))
-
-                    worksheet.write(row_cursor, block_start_col + 1, name, fmt_cell)
-                    worksheet.write(row_cursor, block_start_col + 2, note, fmt_cell)
-                    worksheet.write(row_cursor, block_start_col + 3, dose, fmt_center)
-                    worksheet.write(row_cursor, block_start_col + 4, shift, fmt_center)
-                row_cursor += 1
-
-            row_cursor += 1
+    # --- přidej tuto novou pomocnou funkci ---
+    def _note_from_row(rw) -> str:
+        qty = rw.get("mnozstvi")
+        unit = _safe_str(rw.get("jednotka"))
+        if pd.notna(qty) and str(qty) != "":
+            return f"{qty} {unit}".strip()
+        # když není číslo, ale je jednotka, dej aspoň jednotku; jinak prázdné
+        return unit if unit else ""
 
 
-def _empty_plan_dataframe(week_monday: Optional[date]) -> pd.DataFrame:
-    if week_monday is None:
-        week_monday = date.today()
-    records = []
-    for day in range(6):
-        cur = pd.Timestamp(week_monday) + pd.Timedelta(days=day)
-        for smoker in range(1, 5):
-            for pos in range(1, 8):
-                records.append({
-                    "datum": cur.date(),
-                    "den": CZECH_WEEKDAYS[day],
-                    "udirna": smoker,
-                    "pozice": pos,
-                })
-    return pd.DataFrame.from_records(records)
+    # mapa datumů v rámci týdne (podle počtu dnů v šabloně)
+    day_dates = {i: (week_monday + timedelta(days=i)) for i in range(day_count)}
+
+    for day_idx, hdr in enumerate(header_rows):
+        cur_date = day_dates.get(day_idx)
+        day_rows = df[df["datum"] == cur_date] if cur_date else df.iloc[0:0]
+
+        for s in range(1, smokers_in_template + 1):
+            start = 1 + (s - 1) * BLOCK_COLS
+            name_c, note_c, dose_c = start + 1, start + 2, start + 3
+
+            for pos in range(1, ROWS_PER_SMOKER + 1):
+                rec = day_rows[(day_rows["_udirna"] == s) & (day_rows["_pozice"] == pos)]
+                if rec.empty:
+                    continue
+                rw = rec.iloc[0]
+
+                display_name = _display_name(rw)
+                note = _note_from_row(rw)     # <<< nově
+                dose = _dose_from_row(rw)     # jen davka, bez fallbacku
+
+                rr = hdr + pos
+                _safe_set(ws, rr, name_c, display_name)
+                _safe_set(ws, rr, note_c, note)   
+                _safe_set(ws, rr, dose_c, dose)   # dávka jen když je, jinak prázdné
+
+
+    # uložit kopii šablony s doplněnými daty
+    ws.parent.save(path)

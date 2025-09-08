@@ -5,12 +5,17 @@ from services import graph_store
 from services.data_utils import to_date_col, fmt_cz_date
 import os
 
+from gui.smoke_plan_window import open_smoke_plan_window
+
+from controllers.smoke_plan_controller import SmokePlanController
+from services.smoke_capacity import CapacityRules
 import PySimpleGUIQt as sg
 import pandas as pd
 from services import graph_store  
 from services.readiness import compute_ready_semis_under_finals
 g = graph_store.get_graph()
 ready_keys = compute_ready_semis_under_finals(g)
+
 
 from services.paths import OUTPUT_SEMI_EXCEL
 from services.data_utils import (
@@ -50,6 +55,14 @@ LAST_WIN_POS: Optional[Tuple[int, int]] = None
 # Přidej nahoru k ostatním konstantám:
 READY_BG = "#d9fdd3"  # světle zelené pozadí pro „vše koupeno“
 
+def _popup_ok_safe(message: str, title: str) -> None:
+    try:
+        sg.popup_ok(message, title=title, keep_on_top=True, image=None)
+    except Exception:
+        try:
+            sg.popup(message, title=title, keep_on_top=True)
+        except Exception:
+            pass
 
 def _to_int_or_none(x):
     try:
@@ -59,6 +72,15 @@ def _to_int_or_none(x):
         return int(s)
     except Exception:
         return None
+
+def _collect_selected_indices_from_window(buy_map: Dict[str, List[int]], values: dict) -> List[int]:
+    """Vrátí uniq seřazené indexy df_main z aktuálně zaškrtnutých checkboxů."""
+    picked: List[int] = []
+    for key, idxs in buy_map.items():
+        if key.startswith("-SEL") and values.get(key, False):
+            picked.extend(int(i) for i in idxs if pd.notna(i))
+    # uniq + sort
+    return sorted({int(i) for i in picked})
 
 
 def _is_polotovar_ready(sk, rc) -> bool:
@@ -199,9 +221,11 @@ def _header_row():
         sg.Text("Název",   size=(NAME_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD),
         sg.Text("Množství", size=(QTY_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD, justification="right"),
         sg.Text("",        size=(UNIT_WIDTH_CHARS, 1), font=FONT_HEADER, pad=CELL_PAD),
-        sg.Text("Akce",    size=(10, 1), font=FONT_HEADER, pad=CELL_PAD),
+        sg.Text("Výběr",   size=(10, 1), font=FONT_HEADER, pad=CELL_PAD),
     ]
-def _row_main(d: dict, row_key: str, *, show_action: bool = True, ready: bool = False):
+
+
+def _row_main(d: dict, row_key: str, *, select_key: str, ready: bool = False):
     row = [
         sg.Text(str(d.get("datum", "")), size=(DATE_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
         sg.Text(str(d.get("polotovar_rc", "")), size=(RC_WIDTH, 1), pad=CELL_PAD, font=FONT_ROW),
@@ -209,7 +233,7 @@ def _row_main(d: dict, row_key: str, *, show_action: bool = True, ready: bool = 
             d.get("polotovar_nazev", ""),
             height=1,
             is_main=True,
-            underline=ready,  # ← podtrhni, pokud jsou všechny ingredience koupené
+            underline=ready,  # podtržení „vše koupeno“
         ),
         sg.Text(
             _fmt_qty_2dec_cz(d.get("potreba", "")),
@@ -219,15 +243,23 @@ def _row_main(d: dict, row_key: str, *, show_action: bool = True, ready: bool = 
             font=FONT_ROW_BOLD,
         ),
         sg.Text(str(d.get("jednotka", "")), size=(UNIT_WIDTH_CHARS, 1), pad=CELL_PAD, font=FONT_ROW),
+        sg.Checkbox("", key=select_key, default=False, enable_events=False, pad=BTN_PAD),
     ]
-    if show_action:
-        row.append(sg.Button("Naplánováno", key=row_key, size=(9, 1), pad=BTN_PAD))
-    else:
-        row.append(sg.Text("", size=(10, 1), pad=BTN_PAD))
     return row
 
+def _collect_selected_df(table_values: list, columns: list, selected_row_indices: list[int]) -> pd.DataFrame:
+    # table_values = list[list[cell]], columns = názvy sloupců
+    rows = [dict(zip(columns, table_values[i])) for i in selected_row_indices]
+    return pd.DataFrame(rows)
 
+def on_plan_button_click(df_main: pd.DataFrame, selected_indices: list[int]) -> None:
+    if not selected_indices:
+        _popup_ok_safe("Nejprve vyberte alespoň jeden polotovar.", "Není co plánovat")
+        return
+    df_selected = df_main.iloc[selected_indices].copy()
+    open_smoke_plan_window(df_selected)
 
+    
 def _row_detail(d: dict):
     # hodnoty z detailu
     vyrobek_rc = str(d.get("vyrobek_rc", "") or d.get("final_rc", "")).strip()
@@ -361,12 +393,6 @@ def _build_rows(
     show_details: bool,
     weekly_sum: bool,
 ):
-    """
-    Vrací (rows_layout, buy_map, rowkey_map).
-    - weekly_sum=False: standardní řádky + volitelné detaily a akce.
-    - weekly_sum=True: agregace po týdnech, tlačítko ovlivní VŠECHNY zdrojové řádky v agregaci.
-                       Pokud show_details=True, vypíšou se detailní podsestavy všech zdrojových řádků.
-    """
     buy_map: Dict[str, List[int]] = {}
     rowkey_map: Dict[str, str] = {}
 
@@ -403,21 +429,21 @@ def _build_rows(
 
             ready = _is_polotovar_ready(sk, rc)
 
-            row_key = f"-WSEMI-{btn_id}-"
+            select_key = f"-SELW-{btn_id}-"
             btn_id += 1
 
             main_row = _row_main(
                 {
                     "datum": r.get("datum", ""),
-                    "polotovar_sk": sk,   # ponecháno pro klíčování detailů
+                    "polotovar_sk": sk,
                     "polotovar_rc": rc,
                     "polotovar_nazev": nm,
                     "potreba": r.get("potreba", ""),
                     "jednotka": mj,
                 },
-                row_key=row_key,
-                show_action=True,
-                ready=ready,  # ← podtržení názvu
+                row_key=select_key,  # jen pro podpis, nepoužívá se dál
+                select_key=select_key,
+                ready=ready,
             )
             rows.append([*main_row])
 
@@ -434,10 +460,56 @@ def _build_rows(
                     for det in df_details_map.get(key_det, []):
                         rows.append([*_row_detail(det)])
 
-            buy_map[row_key] = idx_list
-            rowkey_map[row_key] = row_key
+            # mapování: checkbox -> zdrojové řádky
+            buy_map[select_key] = idx_list
+            rowkey_map[select_key] = select_key
 
         return rows, buy_map, rowkey_map
+
+    # ------ neagregovaný režim ------
+    d = _filter_unmade(df_main, col_k)
+    if d.empty:
+        return None, buy_map, rowkey_map
+
+    to_date_col(d, "datum")
+    d["_sort_datum"] = pd.to_datetime(d["datum"], errors="coerce")
+    d = d.sort_values(["_sort_datum", "polotovar_sk", "polotovar_rc"], kind="mergesort")
+
+    rows: List[List[sg.Element]] = [[*_header_row()]]
+
+    for i, r in d.iterrows():
+        sk_val = r.get("polotovar_sk", "")
+        rc_val = r.get("polotovar_rc", "")
+
+        ready = _is_polotovar_ready(sk_val, rc_val)
+
+        select_key = f"-SEL-{int(i)}-"
+
+        main_row = _row_main(
+            {
+                "datum": fmt_cz_date(r.get("datum", "")),
+                "polotovar_sk": sk_val,
+                "polotovar_rc": rc_val,
+                "polotovar_nazev": r.get("polotovar_nazev", ""),
+                "potreba": r.get("potreba", ""),
+                "jednotka": r.get("jednotka", ""),
+            },
+            row_key=select_key,
+            select_key=select_key,
+            ready=ready,
+        )
+        rows.append([*main_row])
+
+        if show_details:
+            key = (str(sk_val), str(rc_val), r.get("datum", ""))
+            for det in df_details_map.get(key, []):
+                rows.append([*_row_detail(det)])
+
+        # každý checkbox odpovídá přesně jednomu řádku df_main
+        buy_map[select_key] = [int(i)]
+        rowkey_map[select_key] = select_key
+
+    return rows, buy_map, rowkey_map
 
     # ------ neagregovaný režim ------
     d = _filter_unmade(df_main, col_k)
@@ -513,6 +585,7 @@ def _create_window(df_main, detail_map, col_k, show_details, weekly_sum, locatio
             pad=((18, 0), 0),
             font=FONT_ROW_BOLD,
         ),
+        sg.Button("Naplánovat", key="PLAN", size=(14, 1), pad=((18, 0), 0)),
         sg.Button("Zavřít", key="-CLOSE-", size=(14, 1), pad=((12, 0), 0)),
     ]
     controls_col = sg.Column([controls], element_justification='center', pad=(0, 6))
@@ -531,7 +604,6 @@ def _create_window(df_main, detail_map, col_k, show_details, weekly_sum, locatio
 
     w = sg.Window("Plán polotovarů", layout, **win_kwargs)
     return w, buy_map, rowkey_map
-
 
 def _builder_factory(df_main, detail_map, col_k, show_details, weekly_sum):
     """Vrátí funkci builder(location)->(window, buy_map, rowkey_map) pro recreate_window_preserving."""
@@ -773,6 +845,12 @@ def open_semis_results():
                 loops += 1
                 if max_loops is not None and loops >= max_loops: break
                 continue
+
+            if ev == "PLAN":
+                sel_indices = _collect_selected_indices_from_window(buy_map, vals)
+                on_plan_button_click(df_main, sel_indices)
+                continue
+
 
             # bezpečnostní stopka
             loops += 1
