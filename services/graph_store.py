@@ -196,15 +196,30 @@ def get_semis_dfs() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 # ----------------------------- API: Mutátory (GUI je volá při kliknutí) ----------------
 def set_ingredient_bought(dt, sk, rc, *, bought: bool = True) -> None:
-    """Označ/odznač danou ingredienci pro konkrétní datum jako koupenou."""
-    global _DIRTY_ING
+    """Označ/odznač danou ingredienci pro konkrétní datum jako koupenou + aktualizuj runtime graf."""
+    global _DIRTY_ING, _BOUGHT_KEYS, _G
     k = _key_triplet(dt, sk, rc)
+
     if bought:
         _BOUGHT_KEYS.add(k)
     else:
         _BOUGHT_KEYS.discard(k)
 
-    # invalidace projekce + persist do Excelu
+    # --- důležité: přepiš stav v živém grafu, aby readiness fungovala hned ---
+    try:
+        i_sk = _to_int(sk)
+        i_rc = _to_int(rc)
+        nid = (i_sk if i_sk is not None else int(sk),
+               i_rc if i_rc is not None else int(rc))
+        g = get_graph()
+        node = g.nodes.get(nid)
+        if node is not None:
+            node.bought = bool(bought)
+    except Exception:
+        # nechceme shodit GUI kvůli drobné nekonzistenci; persist i tak proběhne
+        pass
+
+    # invalidace projekce ingrediencí + persist do Excelu
     _DIRTY_ING = True
     df = get_ingredients_df()
     try:
@@ -212,10 +227,76 @@ def set_ingredient_bought(dt, sk, rc, *, bought: bool = True) -> None:
     except Exception as e:
         ERR.show_error(ERR.MSG.get("results_save", "Chyba při ukládání ingrediencí."), e)
 
+def set_ingredient_bought(dt, sk, rc, *, bought: bool = True) -> None:
+    """Označ/odznač danou ingredienci pro konkrétní datum jako koupenou + okamžitě uprav runtime graf."""
+    global _DIRTY_ING, _BOUGHT_KEYS
+
+    # 1) ulož klíč do množiny koupených (pro persist a tabulky)
+    k = _key_triplet(dt, sk, rc)
+    if bought:
+        _BOUGHT_KEYS.add(k)
+    else:
+        _BOUGHT_KEYS.discard(k)
+
+    # 2) okamžitě přepiš stav v běžícím grafu (readiness v polotovarech čte node.bought)
+    try:
+        g = get_graph()
+        i_sk = _to_int(sk)
+        i_rc = _to_int(rc)
+        nid = (
+            i_sk if i_sk is not None else int(sk),
+            i_rc if i_rc is not None else int(rc),
+        )
+        node = g.nodes.get(nid)
+        if node is not None:
+            node.bought = bool(bought)
+    except Exception:
+        # nechceme kvůli nekonzistenci shodit GUI; persist proběhne i tak
+        pass
+
+    # 3) invalidace a persist ingrediencí do Excelu
+    _DIRTY_ING = True
+    df = get_ingredients_df()
+    try:
+        ensure_output_excel(df)
+    except Exception as e:
+        ERR.show_error(ERR.MSG.get("results_save", "Chyba při ukládání ingrediencí."), e)
+
+
 def set_ingredients_bought_many(keys: Iterable[Tuple[object, int, int]], *, bought: bool = True) -> None:
-    """Hromadně (např. více řádků) – keys = (datum, sk, rc)."""
+    """Hromadně (např. více řádků): keys = (datum, sk, rc). Aktualizuje i runtime graf a persistne najednou."""
+    global _DIRTY_ING, _BOUGHT_KEYS
+
+    # 1) uprav množinu koupených + runtime graf
+    g = get_graph()
     for dt, sk, rc in keys:
-        set_ingredient_bought(dt, sk, rc, bought=bought)
+        k = _key_triplet(dt, sk, rc)
+        if bought:
+            _BOUGHT_KEYS.add(k)
+        else:
+            _BOUGHT_KEYS.discard(k)
+
+        try:
+            i_sk = _to_int(sk)
+            i_rc = _to_int(rc)
+            nid = (
+                i_sk if i_sk is not None else int(sk),
+                i_rc if i_rc is not None else int(rc),
+            )
+            node = g.nodes.get(nid)
+            if node is not None:
+                node.bought = bool(bought)
+        except Exception:
+            # pokračuj, ať hromadná operace doběhne
+            pass
+
+    # 2) invalidace + jeden persist pro výkon
+    _DIRTY_ING = True
+    df = get_ingredients_df()
+    try:
+        ensure_output_excel(df)
+    except Exception as e:
+        ERR.show_error(ERR.MSG.get("results_save", "Chyba při ukládání ingrediencí."), e)
 
 def set_semi_produced(dt, sk, rc, *, produced: bool = True) -> None:
     """Označ/odznač daný polotovar pro konkrétní datum jako vyrobený (naplánováno)."""

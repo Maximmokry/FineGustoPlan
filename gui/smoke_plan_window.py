@@ -6,15 +6,11 @@ from pathlib import Path
 from datetime import date, timedelta
 from typing import Dict, List, Tuple, Optional
 from math import floor
-
-# doplnit importy služeb (nad open_smoke_plan_window)
-from services.semi_excel_service import ensure_output_semis_excel
-from services.smoke_sync_service import apply_plan_flags
+from services import graph_store
 
 import PySimpleGUIQt as sg
 import pandas as pd
 
-# ==== NOVÉ IMPORTY PRO EXCEL SERVICE ====
 from services.smoke_excel_service import write_smoke_plan_excel
 from services.smoke_paths import smoke_plan_excel_path
 
@@ -477,7 +473,6 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
     # Globální odebrání implicitních rozestupů
     sg.set_options(element_padding=(0, 0))
 
-    sg.theme("SystemDefault")
 
     try: scr_w, scr_h = sg.Window.get_screen_size()
     except Exception: scr_w, scr_h = (1600, 900)
@@ -605,12 +600,10 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
             continue
 
         if event == "SAVE":
-            # === NOVÉ ULOŽENÍ DO ŠABLONY ===
+            # === ULOŽIT PLÁN DO EXCEL ŠABLONY ===
             plan_df = _flatten_for_excel_from_ui(grid, week_monday, values)
             out = smoke_plan_excel_path(week_monday)
 
-
-            
             try:
                 write_smoke_plan_excel(
                     str(out),
@@ -618,12 +611,49 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
                     week_monday=week_monday,   # pro správné nadpisy dnů
                     sheet_name=None,           # použije se 1. list ze šablony
                 )
-                _popup_ok_safe(f"Uloženo do:\n{out}", "Uloženo")
             except Exception as e:
                 _popup_ok_safe(f"Chyba při ukládání:\n{e}", "Chyba")
+                continue
 
+            # === PO ULOŽENÍ: OZNAČ VŠECHNY PŮVODNĚ VYBRANÉ POLOTOVARY JAKO VYROBENÉ ===
+            try:
+                from services import graph_store  # lokální import, ať není nutná změna nahoře
+
+                # použij původní výběr předaný do okna (správné datum!)
+                src = selected_df.copy()
+
+                # sjednoť typ datumu na date (bez času), aby se přesně trefil klíč (datum, sk, rc)
+                if "datum" in src.columns:
+                    src["datum"] = pd.to_datetime(src["datum"], errors="coerce").dt.date
+
+                need_cols = ["datum", "polotovar_sk", "polotovar_rc"]
+                missing = [c for c in need_cols if c not in src.columns]
+                if missing:
+                    raise KeyError(f"Chybí sloupce: {missing}")
+
+                # vyhoď NaN a prázdné SK/RC, odstraň duplicity
+                sub = src[need_cols].dropna().copy()
+                sub = sub[
+                    (sub["polotovar_sk"].astype(str).str.strip() != "") &
+                    (sub["polotovar_rc"].astype(str).str.strip() != "")
+                ].drop_duplicates()
+
+                # klíče pro hromadné označení
+                keys = {(r["datum"], r["polotovar_sk"], r["polotovar_rc"]) for _, r in sub.iterrows()}
+
+                if keys:
+                    graph_store.set_semis_produced_many(keys, produced=True)
+
+                _popup_ok_safe(
+                    f"Uloženo do:\n{out}\n\n"
+                    f"Označeno {len(keys)} polotovarů jako vyrobené.",
+                    "Uloženo"
+                )
+            except Exception as e:
+                _popup_ok_safe(f"Plán se uložil, ale označení vyrobeno selhalo:\n{e}", "Upozornění")
 
             continue
+
 
     try: window.close()
     except Exception: pass
