@@ -1,5 +1,4 @@
 # tests/test_uc7_weekly_semis.py
-import types
 import pandas as pd
 import datetime as dt
 import importlib
@@ -10,10 +9,9 @@ class _SGStub:
         # Vrací jen jednoduchý popis, samotný obsah nás v testech nezajímá
         return ("Text", args, kwargs)
 
-    def Button(self, *args, **kwargs):
-        return ("Button", args, kwargs)
+    def Checkbox(self, *args, **kwargs):
+        return ("Checkbox", args, kwargs)
 
-# Poznámka: _build_rows používá pouze sg.Text a sg.Button.
 # (Column / Window apod. jsou až ve vyšších vrstvách, které netestujeme.)
 
 def _make_df_main():
@@ -54,8 +52,8 @@ def _make_df_main():
 
 def test_uc7_weekly_aggregate_and_map(monkeypatch):
     """
-    UC7: Týdenní souhrn polotovarů (Po–Ne) + mapování tlačítka “Naplánováno” na VŠECHNY
-    zdrojové řádky dané týdenní skupiny.
+    UC7: Týdenní souhrn polotovarů (Po–Ne) + mapování checkboxu “Naplánováno”
+    na VŠECHNY zdrojové řádky dané týdenní skupiny.
     """
     # Import modulu s funkcemi, které testujeme
     semis_mod = importlib.import_module("gui.results_semis_window")
@@ -102,23 +100,23 @@ def test_uc7_weekly_aggregate_and_map(monkeypatch):
         weekly_sum=True,
     )
 
-    # Měli bychom mít dvě skupinová tlačítka (pro A a B), jejich klíče začínají "-WSEMI-"
-    w_keys = [k for k in buy_map.keys() if k.startswith("-WSEMI-")]
-    assert len(w_keys) == 2, "V weekly režimu očekáváme 2 tlačítka (pro skupinu A a B)"
+    # Měli bychom mít dvě skupinové checkboxy (pro A a B), jejich klíče začínají "-WSEMI-"
+    w_check_keys = [k for k in buy_map.keys() if k.startswith("-WSEMI-")]
+    assert len(w_check_keys) == 2, "V weekly režimu očekáváme 2 checkboxy (pro skupinu A a B)"
 
-    # Najdi, které tlačítko odpovídá skupině A: musí obsahovat indexy dvou prvních řádků (0 a 1)
+    # Najdi, který checkbox odpovídá skupině A: musí obsahovat indexy dvou prvních řádků (0 a 1)
     # (Pozn.: indexy z původního df_main – jejich pořadí je tak, jak jsme data vložili)
-    idx_set = set([0, 1])
+    idx_set = {0, 1}
     a_key = None
-    for k in w_keys:
+    for k in w_check_keys:
         idxs = set(buy_map[k])
         if idxs == idx_set:
             a_key = k
             break
 
-    assert a_key is not None, "Pro skupinu A neexistuje weekly tlačítko s indexy {0,1}"
+    assert a_key is not None, "Pro skupinu A neexistuje weekly checkbox s indexy {0,1}"
 
-    # “Simulace kliknutí” → označ všechny zdrojové řádky skupiny A jako vyrobeno=True
+    # “Zaškrtnutí” → označ všechny zdrojové řádky skupiny A jako vyrobeno=True
     df_after = df_main.copy()
     df_after.loc[list(idx_set), "vyrobeno"] = True
 
@@ -131,9 +129,9 @@ def test_uc7_weekly_aggregate_and_map(monkeypatch):
         weekly_sum=True,
     )
 
-    # Zůstane jen skupina B (jedno tlačítko)
-    w_keys2 = [k for k in buy_map2.keys() if k.startswith("-WSEMI-")]
-    assert len(w_keys2) == 1, "Po označení A jako vyrobené má zůstat jen 1 weekly skupina (B)."
+    # Zůstane jen skupina B (jeden checkbox)
+    w_check_keys2 = [k for k in buy_map2.keys() if k.startswith("-WSEMI-")]
+    assert len(w_check_keys2) == 1, "Po označení A jako vyrobené má zůstat jen 1 weekly checkbox (B)."
 
-    # A kontrola, že ta jediná weekly skupina odkazuje na třetí řádek (index 2)
-    assert set(buy_map2[w_keys2[0]]) == {2}, "Zbývající weekly skupina musí ukazovat na index 2 (B)."
+    # A kontrola, že ten jediný weekly checkbox odkazuje na třetí řádek (index 2)
+    assert set(buy_map2[w_check_keys2[0]]) == {2}, "Zbývající weekly skupina musí ukazovat na index 2 (B)."
