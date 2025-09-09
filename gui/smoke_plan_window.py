@@ -11,7 +11,7 @@ from services.semi_excel_service import ensure_output_semis_excel
 from services.smoke_sync_service import apply_plan_flags
 from services.smoke_engine import build_default_engine
 from services.smoke_rules import RuleViolation
-
+NAME_WIDTH_CHARS = 36
 
 import PySimpleGUIQt as sg
 import pandas as pd

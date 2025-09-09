@@ -80,7 +80,7 @@ class SingleProductPerSlotRule:
         incoming = self._key(item)
         present_keys = {self._key(it) for it in slot_items}
 
-        # Zabráníme mixu v cílovém slotu (pro případ starých dat)
+        # Slot už obsahuje mix → zamítni (ochrana proti starým datům)
         if len(present_keys) > 1:
             return CheckOutcome(
                 kind="BLOCK",
@@ -204,7 +204,7 @@ class AutoMergePolicy:
             sum_raw = 0.0
             has_raw = False
             for it in group:
-                sum_qty += float(getattr(it, "qty", 0.0) or 0.0)
+                sum_qty += float(getattr(it, "qty", 0.0) or getattr(it, "mnozstvi", 0.0) or 0.0)
                 if hasattr(it, "raw_qty"):
                     has_raw = True
                     sum_raw += float(getattr(it, "raw_qty", 0.0) or 0.0)
@@ -275,7 +275,7 @@ def default_raw_mass_extractor(it: HasItemAttrs) -> Tuple[float, Optional[str]]:
     if rq is not None:
         return float(rq or 0.0), (str(getattr(it, "meat_type", "")).lower() or None)
 
-    return float(getattr(it, "qty", 0.0) or 0.0), (str(getattr(it, "meat_type", "")).lower() or None)
+    return float(getattr(it, "qty", 0.0) or getattr(it, "mnozstvi", 0.0) or 0.0), (str(getattr(it, "meat_type", "")).lower() or None)
 
 def is_biltong_name(name: str) -> bool:
     return "biltong" in (name or "").lower()
