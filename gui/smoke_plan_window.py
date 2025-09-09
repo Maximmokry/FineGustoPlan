@@ -7,9 +7,11 @@ from datetime import date, timedelta
 from typing import Dict, List, Tuple, Optional
 from math import floor
 from services import graph_store
-# doplnit importy služeb (nad open_smoke_plan_window)
 from services.semi_excel_service import ensure_output_semis_excel
 from services.smoke_sync_service import apply_plan_flags
+from services.smoke_engine import build_default_engine
+from services.smoke_rules import RuleViolation
+
 
 import PySimpleGUIQt as sg
 import pandas as pd
@@ -17,6 +19,16 @@ import pandas as pd
 # ==== NOVÉ IMPORTY PRO EXCEL SERVICE ====
 from services.smoke_excel_service import write_smoke_plan_excel
 from services.smoke_paths import smoke_plan_excel_path
+
+
+RULES_ENGINE = build_default_engine(
+    base_per_smoker=[400.0, 300.0, 400.0, 400.0],   # default limity (kg syrového) pro udírny 1..4
+    per_type_overrides={
+        # příklady:
+        # "veprove": [420, 320, 420, 420],
+        # "hovezi":  [300, 250, 300, 300],
+    },
+)
 
 # ====== Globální škálování ======
 SCALE_X = 0.37   # užší šířky (ponecháno)
@@ -38,6 +50,7 @@ BG = "#ffffff"
 SLOT_PICK_BG   = "#fff7cc"   # vybraný (drag)
 SLOT_FILLED_BG = "#eef8e9"   # obsazený
 HDR_COLORS = ["#FFF2A8", "#D1F5D3", "#D1E6FF", "#FFE6CC"]  # 1..4
+SLOT_OVER_BG = "#FFD6D6"  
 
 # agresivně malé pady
 PAD_ELEM = (0, 0)
@@ -64,6 +77,13 @@ class Item:
 CellKey = Tuple[int, int, int]  # (day_idx, smoker_idx, row_idx)
 
 # ====== Utility ======
+
+def _confirm_rule(msg: str) -> bool:
+    try:
+        return sg.popup_yes_no(msg, title="Potvrzení") == "Yes"
+    except Exception:
+        return False
+
 def _next_week_monday(today: Optional[date] = None) -> date:
     d = today or date.today()
     offs = (7 - d.weekday()) % 7
@@ -131,32 +151,9 @@ def _coerce_item(row: dict) -> Item:
         source_id=str(row.get("source_id") or row.get("id") or row.get("row_id") or row.get("guid") or ""),
     )
 
-def _prefill_round_robin_days(items: List[Item]) -> Dict[CellKey, List[Item]]:
-    """
-    Rozdělení: den -> udírna -> řádek.
-    Den se mění nejrychleji, po obtočení všech dnů se posune udírna,
-    po obtočení udíren se posune řádek.
-    Výsledek: postupné plnění dnů (Po, Út, St, ...), ne celý den naráz.
-    """
-    grid: Dict[CellKey, List[Item]] = {
-        (d, s, r): [] for d in range(DAYS) for s in range(1, SMOKERS + 1) for r in range(1, ROWS_PER_SMOKER + 1)
-    }
+def _prefill_with_rules(items: List[Item]) -> Dict[CellKey, List[Item]]:
+    return RULES_ENGINE.prefill(items, DAYS, SMOKERS, ROWS_PER_SMOKER, confirm_cb=_confirm_rule)
 
-    d, s, r = 0, 1, 1  # den, udírna, řádek
-    for it in items:
-        grid[(d, s, r)].append(it)
-
-        # den -> udírna -> řádek
-        d += 1
-        if d >= DAYS:
-            d = 0
-            s += 1
-            if s > SMOKERS:
-                s = 1
-                r += 1
-                if r > ROWS_PER_SMOKER:
-                    r = 1  # po naplnění všech slotů jedeme znova (append do stejných slotů)
-    return grid
 
 def _fmt_qty2_cz(v: float) -> str:
     try: return f"{float(v):.2f}".replace(".", ",")
@@ -204,7 +201,7 @@ def _update_all_cells(window: sg.Window, grid: Dict[CellKey, List[Item]], name_c
     for (d, s, r), items in grid.items():
         if ("CELL_TEXT", d, s, r) in window.AllKeysDict:
             _update_cell_widgets(window, d, s, r, items, name_chars)
-        _paint_slot_bg(window, d, s, r, bool(items), False)
+        _paint_slot_bg(window, d, s, r, items, False)
 
 # ====== Kurzory (PySide6) ======
 def _set_grab_cursors(window: sg.Window, dragging: bool) -> None:
@@ -266,13 +263,20 @@ def _refresh_handles(window: sg.Window, grid: Dict[CellKey, List[Item]], draggin
                                     disabled=False)
 
 # ====== Slot background ======
-def _paint_slot_bg(window: sg.Window, d: int, s: int, r: int, filled: bool, picked: bool) -> None:
+def _paint_slot_bg(window: sg.Window, d: int, s: int, r: int, items: List[Item], picked: bool) -> None:
     key_slot = ("SLOT", d, s, r)
     try:
         elem = window[key_slot]; w = elem.Widget
-        col = SLOT_PICK_BG if picked else (SLOT_FILLED_BG if filled else BG)
+        if picked:
+            col = SLOT_PICK_BG
+        elif items:
+            info = RULES_ENGINE.paint_info(s, items)  # s = smoker index (1-based)
+            col = SLOT_OVER_BG if info.get("over") else SLOT_FILLED_BG
+        else:
+            col = BG
         w.setStyleSheet(f"background-color: {col}; border-radius: 2px;")
-    except Exception: pass
+    except Exception:
+        pass
 
 def _refresh_slot_bgs(window: sg.Window, grid: Dict[CellKey, List[Item]], dragging: Optional[CellKey]) -> None:
     for (d, s, r), items in grid.items():
@@ -288,9 +292,23 @@ def _swap_dose_inputs(window: sg.Window, src: CellKey, dst: CellKey) -> None:
     except Exception: pass
 
 def _move_or_swap(window: sg.Window, grid: Dict[CellKey, List[Item]], src: CellKey, dst: CellKey) -> None:
-    if src == dst or src not in grid or dst not in grid: return
-    grid[src], grid[dst] = grid[dst], grid[src]
-    _swap_dose_inputs(window, src, dst)
+    if src == dst or src not in grid or dst not in grid:
+        return
+    ok, viol = RULES_ENGINE.try_move(grid, src, dst, confirm_cb=_confirm_rule, allow_split_on_move=True)
+    if not ok:
+        msg = "Přesun není povolen."
+        if isinstance(viol, RuleViolation):
+            # Jasná hláška s názvem a ID pravidla
+            msg = f"{viol.title} [{viol.rule_id}]\n\n{viol.message}"
+        _popup_ok_safe(msg, "Pravidla plánování")
+        return
+
+    # refresh obou slotů
+    _update_cell_widgets(window, src[0], src[1], src[2], grid[src], NAME_WIDTH_CHARS)
+    _update_cell_widgets(window, dst[0], dst[1], dst[2], grid[dst], NAME_WIDTH_CHARS)
+    _paint_slot_bg(window, src[0], src[1], src[2], grid[src], False)
+    _paint_slot_bg(window, dst[0], dst[1], dst[2], grid[dst], False)
+
 
 # ====== (POUZE TADY ZMĚNA) Převod do DF pro NOVÝ Excel service ======
 def _flatten_for_excel_from_ui(grid: Dict[CellKey, List[Item]], week_monday: date, values: dict) -> pd.DataFrame:
@@ -473,7 +491,7 @@ def open_smoke_plan_window(selected_df: pd.DataFrame) -> None:
     """
     items: List[Item] = [_coerce_item(rec) for rec in selected_df.to_dict("records")]
     week_monday = _next_week_monday()
-    grid: Dict[CellKey, List[Item]] = _prefill_round_robin_days(items)
+    grid: Dict[CellKey, List[Item]] = _prefill_with_rules(items)
 
     # Globální odebrání implicitních rozestupů
     sg.set_options(element_padding=(0, 0))
