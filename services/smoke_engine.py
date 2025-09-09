@@ -210,12 +210,12 @@ class RuleEngine:
 
         # ---------- MOVE (interaktivní přesun nebo swap) ----------
     def try_move(self, grid: Dict[CellKey, List[HasItemAttrs]], src: CellKey, dst: CellKey,
-                 *, confirm_cb: Optional[ConfirmCallback], allow_split_on_move: bool = False
+                 *, confirm_cb: Optional[ConfirmCallback], allow_split_on_move: bool = True
                  ) -> Tuple[bool, Optional[RuleViolation]]:
         """
-        Přesun:  když je cílový slot prázdný, přesune obsah src -> dst (src se vyprázdní).
+        Přesun:  když je cílový slot prázdný, přesune obsah src -> dst (src se vyprázdní, kromě zbytků ze splitu).
         Swap:    když je cílový slot neprázdný, VYMĚNÍ obsah src <-> dst.
-        Pozn.:   defaultně nedovolujeme dělení (allow_split_on_move=False), aby se swap nechoval překvapivě.
+        Splity:  allow_split_on_move=True = část, co se nevejde, zůstane na druhé straně swapu (nebo ve zdroji u move).
         """
         if src == dst or src not in grid or dst not in grid:
             return False, RuleViolation("R-ENGINE", "Neplatná operace", "Neplatný zdroj/cíl slotu.", {})
@@ -223,41 +223,50 @@ class RuleEngine:
         src_items = list(grid[src])
         dst_items = list(grid[dst])
 
-        # 1) Validuj položky ze src, jako kdyby v cíli nic nebylo (swap = nahradíme obsah)
-        cand_dst: List[HasItemAttrs] = []
+        # Kandidáti a zbytky (aby se nic "neztratilo")
+        cand_dst: List[HasItemAttrs] = []   # co půjde do dst ze src
+        keep_in_src: List[HasItemAttrs] = []  # zbytky ze src (když splitujeme při přesunu do dst)
+
         for it in src_items:
             res = self.validate_slot(it, dst[1], cand_dst, confirm_cb=confirm_cb, phase="move")
             if res.ok:
                 cand_dst.append(it)
             elif res.split_qty is not None and allow_split_on_move:
                 part = self._make_item(it, qty=float(res.split_qty))
+                rem  = self._make_item(it, qty=float(res.remainder_qty))
                 cand_dst.append(part)
-                # zbytek necháme v původním slotu (u swapu nedává velký smysl dělit obě strany)
+                keep_in_src.append(rem)   # ZBYTEK ZŮSTÁVÁ NA PROTISTRANĚ (tj. ve zdroji u move/swap)
             else:
-                return False, (res.violation or RuleViolation("R-UNKNOWN", "Pravidlo zamítlo přesun", "Přesun nelze provést.", {}))
+                return False, (res.violation or RuleViolation("R-UNKNOWN","Pravidlo zamítlo přesun","Přesun nelze provést.",{}))
 
-        # 2) Validuj položky z dst, jako kdyby ve zdroji nic nebylo
-        cand_src: List[HasItemAttrs] = []
+        cand_src: List[HasItemAttrs] = []   # co půjde do src z dst
+        keep_in_dst: List[HasItemAttrs] = []  # zbytky z dst (když splitujeme při přesunu do src)
+
         for it in dst_items:
             res = self.validate_slot(it, src[1], cand_src, confirm_cb=confirm_cb, phase="move")
             if res.ok:
                 cand_src.append(it)
             elif res.split_qty is not None and allow_split_on_move:
                 part = self._make_item(it, qty=float(res.split_qty))
+                rem  = self._make_item(it, qty=float(res.remainder_qty))
                 cand_src.append(part)
+                keep_in_dst.append(rem)
             else:
-                return False, (res.violation or RuleViolation("R-UNKNOWN", "Pravidlo zamítlo přesun", "Přesun nelze provést.", {}))
+                return False, (res.violation or RuleViolation("R-UNKNOWN","Pravidlo zamítlo přesun","Přesun nelze provést.",{}))
 
-        # 3) Přiřaď – žádné duplikace, žádné přidávání k původním seznamům
-        grid[dst] = cand_dst
-        grid[src] = cand_src
+        # Finální přiřazení – ŽÁDNÉ KLONOVÁNÍ:
+        #  - do dst jde to, co jsme sestavili ze src, + zbytky z původního dst
+        #  - do src jde to, co jsme sestavili z dst, + zbytky z původního src
+        grid[dst] = cand_dst + keep_in_dst
+        grid[src] = cand_src + keep_in_src
 
-        # 4) Volitelný merge (bez vedlejších efektů – tvoří nové instance)
+        # Auto-merge po obou stranách (sloučí rozdělené části stejného polotovaru)
         if self.merge_policy:
             self.merge_policy.apply(src[1], grid[src])
             self.merge_policy.apply(dst[1], grid[dst])
 
         return True, None
+
 
 
 # ---------- Factory ----------
