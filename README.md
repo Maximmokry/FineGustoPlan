@@ -1,8 +1,54 @@
 # FineGusto Plánovač — README pro nástupce
 
 > **Stav dokumentace a zbytku projektu**  
-> Ucelená dokumentace zcela chybí — nedokončil jsem ji před ukončením spolupráce. Toto README proto slouží jako praktický průvodce pro převzetí. Otevřené věci a nedodělky jsou vedené v **GitHub Issues** tohoto repozitáře.
+> Ucelená dokumentace zcela chybí — nestihl jsem ji dokončit před ukončením spolupráce. Toto README proto slouží jako praktický průvodce pro převzetí. Otevřené věci a nedodělky jsou vedené v **GitHub Issues** tohoto repozitáře.
 
+---
+
+## 0) Stažení projektu a instalace
+
+### Stažení z GitHubu
+**Varianta A — Git:**
+```bash
+git clone https://github.com/Maximmokry/FineGustoPlan
+cd Finegusto
+```
+**Varianta B — ZIP:**
+- Na GitHubu klikni **Code → Download ZIP**, rozbal archiv a otevři složku projektu.
+
+### Virtuální prostředí (doporučeno)
+**Windows (PowerShell):**
+```powershell
+py -3.10 -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+**macOS / Linux:**
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+```
+
+### Instalace závislostí
+Pokud je v repu `requirements.txt`:
+```bash
+pip install -r requirements.txt
+```
+Je možné, že něco bude chybět.
+
+### Příprava dat
+V kořenové složce a ve složce `data/` musí být:
+```
+<repo>/
+  plan.xlsx
+  data/
+    recepty.xlsx
+    plan_udiren_template.xlsx
+```
+
+### První spuštění
+```bash
+python3 run.py
+```
 ---
 
 ## 1) Co projekt dělá (stručný přehled)
@@ -11,7 +57,7 @@ Aplikace slouží k **převodu výrobního plánu (ve formě objednávek) na iti
 
 1. **Vstupy** - aby tento projekt fungoval, potřebuje ve složce `data` excelový soubor s recepturami `recepty.xlsx`, vzor excelu pro export plánu `plan_udiren_template.xlsx` a v kořenové složce excel `plán.xlsx`, do kterého se plní objednávky.
 
-2. **Itinerář surovin** - Z receptur a plánu se vypočítá kolik surovin je třeba na jednotlivý expediční den (je třeba aby bylo nakoupeno x dní předem.) Tento itinerář se zobrazí při stiku tlačítka ingredience. Položky je možno odškrtávat tlačítkem koupeno. Po stisku tlačítka zmizí jednotlivý řádek. Tato informace se uloží do excel souboru `ingredience.xlsx`. Pokud jsou pro nějaký polotvar koupeny všechny ingredience, v itineráři polotovarů se podtrhne.
+2. **Itinerář surovin** - Z receptur a plánu se vypočítá kolik surovin je třeba na jednotlivý expediční den (je třeba aby bylo nakoupeno x dní předem.) Tento itinerář se zobrazí při stisku tlačítka ingredience. Položky je možno odškrtávat tlačítkem koupeno. Po stisku tlačítka zmizí jednotlivý řádek. Tato informace se uloží do excel souboru `ingredience.xlsx`. Pokud jsou pro nějaký polotvar koupeny všechny ingredience, v itineráři polotovarů se podtrhne.
 
 3. **Itinerář konečných polotovarů (SK 300)** z receptur a plánu finálních výrobků (SK 400) na konkrétní expediční dny. Výstup je přehled polotovarů které čekají na zaplánování do výroby. tz, které se v další obrazovce naplánují (a uloží), tak se označí příznakem „vyrobeno“ (soubor `polotovary.xlsx`) a příště se již nezobrazují.
 
@@ -37,7 +83,7 @@ Datovým podkladem je směrový graf sestavený z excelů (načtení data_loader
 - **`services/graph_builder.py`** — sestavení grafu z receptur, rozšíření jmen, expand plánu → `demands`, promítnutí historických stavů do uzlů.
 - **`services/graph_store.py`** — runtime „single source of truth“ (drží Graph), poskytuje DataFrame projekcí, API pro GUI (nastavení koupeno/vyrobeno, reload).
 - **`services/semis_projection.py`** — projekce polotovarů do DF **Přehled** a **Detaily** (vč. vazby na finály 400).
-- **`services/semi_excel_service.py`** — zápis `polotovary.xlsx` (listy **Prehled**, **Detaily**, uživatelský **Polotovary**), merge se starými výstupy se zachováním `vyrobeno=True` (pokud změna množství ≤ ~50 %).
+- **`services/semi_excel_service.py`** — zápis `polotovary.xlsx` (listy **Prehled**, **Detaily**, uživatelský **Polotovary**), merge se starými výstupy se zachováním `vyrobeno=True` (pokud změna množství ≤ ~50 %); **při větší změně se stav resetuje (tj. „předělá se“)**
 - **`services/smoke_excel_service.py`** — zápis týdenního plánu uzení do **šablony Excel** (autodetekce rozložení, čištění starých buněk, zápis názvů/dávek).
 - **`services/smoke_paths.py`** — cesty pro šablonu a výsledné soubory plánu uzení (pondělí týdne v názvu).
 - **`services/smoke_sync_service.py`** — výpočet příznaků **naplánováno**/`smoking_date` pro položky dle `base_id` na základě `plan_df`.
@@ -133,5 +179,6 @@ Cesty k souborům se v běhu **přizpůsobují** tomu, zda jde o repozitář neb
 
 ## 8) Známé problémy
 
-Je na githubu v sekci issues
+Na githubu v sekci issues
 ---
+Gl

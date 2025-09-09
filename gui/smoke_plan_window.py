@@ -29,6 +29,21 @@ RULES_ENGINE = build_default_engine(
         # "hovezi":  [300, 250, 300, 300],
     },
 )
+# Jednoduchý callback pro dotazy z pravidel (ASK)
+def _confirm_rule_violation(msg: str) -> bool:
+    """
+    Vrátí True, pokud uživatel potvrdí, jinak False.
+    Funguje na PySimpleGUIQt bez přímého importu PyQt5.
+    """
+    resp = sg.popup_yes_no(
+        msg or "Tato akce porušuje doporučené pravidlo. Opravdu pokračovat?",
+        title="Potvrdit akci?",
+        keep_on_top=True,
+        modal=True,
+    )
+    # PySimpleGUI vrací řetězec "Yes"/"No" (pro jistotu podporuj i True/False)
+    return bool(resp) and str(resp).lower().startswith("y")
+
 
 # ====== Globální škálování ======
 SCALE_X = 0.37   # užší šířky (ponecháno)
@@ -282,30 +297,41 @@ def _refresh_slot_bgs(window: sg.Window, grid: Dict[CellKey, List[Item]], draggi
     for (d, s, r), items in grid.items():
         _paint_slot_bg(window, d, s, r, bool(items), dragging == (d, s, r))
 
-def _swap_dose_inputs(window: sg.Window, src: CellKey, dst: CellKey) -> None:
-    ksrc = ("DOSE",) + src; kdst = ("DOSE",) + dst
-    try:
-        v_src = window[ksrc].get() if ksrc in window.AllKeysDict else ""
-        v_dst = window[kdst].get() if kdst in window.AllKeysDict else ""
-        if ksrc in window.AllKeysDict: window[ksrc].update(v_dst)
-        if kdst in window.AllKeysDict: window[kdst].update(v_src)
-    except Exception: pass
+
 
 def _move_or_swap(window: sg.Window, grid: Dict[CellKey, List[Item]], src: CellKey, dst: CellKey) -> None:
+    # validace klíčů
     if src == dst or src not in grid or dst not in grid:
         return
-    ok, viol = RULES_ENGINE.try_move(grid, src, dst, confirm_cb=_confirm_rule, allow_split_on_move=True)
+
+    # interaktivní move/swap s potvrzením pravidel; zbytky při splitu se neztratí
+    ok, viol = RULES_ENGINE.try_move(
+        grid, src, dst,
+        confirm_cb=_confirm_rule,
+        allow_split_on_move=True
+    )
+
     if not ok:
+        # srozumitelná hláška s názvem a ID pravidla
+        title = "Pravidla plánování"
         msg = "Přesun není povolen."
         if isinstance(viol, RuleViolation):
-            # Jasná hláška s názvem a ID pravidla
             msg = f"{viol.title} [{viol.rule_id}]\n\n{viol.message}"
-        _popup_ok_safe(msg, "Pravidla plánování")
+        try:
+            _popup_ok_safe(msg, title)   # pokud _popup_ok_safe máš
+        except Exception:
+            sg.popup(msg, title=title, keep_on_top=True, modal=True)
         return
 
-    # refresh obou slotů
-    _update_cell_widgets(window, src[0], src[1], src[2], grid[src], NAME_WIDTH_CHARS)
-    _update_cell_widgets(window, dst[0], dst[1], dst[2], grid[dst], NAME_WIDTH_CHARS)
+    # šířka jména: vezmi z okna, jinak bezpečný default (36),
+    # nepoužívej neexistující globální NAME_WIDTH_CHARS
+    name_chars = getattr(window, "name_width_chars", globals().get("NAME_WIDTH_CHARS", 36))
+
+    # refresh obou slotů po skutečném swapu
+    _update_cell_widgets(window, src[0], src[1], src[2], grid[src], name_chars)
+    _update_cell_widgets(window, dst[0], dst[1], dst[2], grid[dst], name_chars)
+
+    # přebarvení pozadí (volitelné zvýraznění)
     _paint_slot_bg(window, src[0], src[1], src[2], grid[src], False)
     _paint_slot_bg(window, dst[0], dst[1], dst[2], grid[dst], False)
 

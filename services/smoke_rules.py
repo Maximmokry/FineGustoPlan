@@ -103,41 +103,43 @@ class SingleProductPerSlotRule:
             )
 
         return CheckOutcome(kind="OK")
-
 @dataclass
 class BiltongRule:
     """
     R-SMOKER4-RESERVED + R-BILTONG-ONLY-4:
-    - Udírna #4 je vyhrazena pro biltong (ne-biltong do #4 = ASK; v prefillu se #4 pro ne-biltong NEpoužije).
-    - Biltong smí POUZE do #4 (vždy BLOCK mimo #4).
-    - Biltong nemá kapacitní limit.
+    - Interaktivně (move/swap): biltong do 1–3 i ne-biltong do #4 => vždy ASK (uživatel potvrdí/odmítne).
+    - Prefill: ASK se neakceptuje, takže prefill tyto kombinace nepoužije.
+    - Biltong nemá kapacitní limit (řeší CapacityByRawRule tím, že jej hned pouští).
     """
     is_biltong: Callable[[str], bool]
     reserved_idx: int = 4
-    non_biltong_on_reserved_ask: bool = True
+    non_biltong_on_reserved_ask: bool = True  # ponecháno kvůli kompatibilitě
 
     def check(self, item: HasItemAttrs, slot_items: List[HasItemAttrs], smoker_idx: int, phase: Phase) -> CheckOutcome:
         name = (item.name or "").lower()
         is_b = self.is_biltong(name)
 
+        # biltong mimo #4 => ASK
         if is_b and smoker_idx != self.reserved_idx:
-            return CheckOutcome(
-                kind="BLOCK",
-                violation=RuleViolation(
-                    "R-BILTONG-ONLY-4", "Biltong jen do #4",
-                    f"Cíl je #{smoker_idx}, ale biltong smí pouze do #{self.reserved_idx}.",
-                    {"smoker": smoker_idx, "product": item.name},
-                ),
-            )
-
-        if (not is_b) and smoker_idx == self.reserved_idx and self.non_biltong_on_reserved_ask:
             return CheckOutcome(
                 kind="ASK",
                 violation=RuleViolation(
-                    "R-SMOKER4-RESERVED", f"Udírna #{self.reserved_idx} vyhrazena pro biltong",
+                    "R-BILTONG-ONLY-4", "Biltong jen do #4 (doporučení)",
+                    f"Cíl je #{smoker_idx}. Chcete opravdu vložit biltong mimo #{self.reserved_idx}?",
+                    {"smoker": smoker_idx, "product": item.name},
+                ),
+                ask_message=f"Biltong smí standardně jen do #{self.reserved_idx}. Vložit přesto do #{smoker_idx}?"
+            )
+
+        # ne-biltong do #4 => ASK
+        if (not is_b) and smoker_idx == self.reserved_idx:
+            return CheckOutcome(
+                kind="ASK",
+                violation=RuleViolation(
+                    "R-SMOKER4-RESERVED", f"Udírna #{self.reserved_idx} vyhrazena pro biltong (doporučení)",
                     "Vložit přesto?", {"smoker": smoker_idx, "product": item.name},
                 ),
-                ask_message=f"Udírna #{self.reserved_idx} je vyhrazena pro biltong. Vložit přesto?",
+                ask_message=f"Udírna #{self.reserved_idx} je standardně vyhrazena pro biltong. Vložit přesto?"
             )
 
         return CheckOutcome(kind="OK")
@@ -153,34 +155,55 @@ class CapacityByRawRule:
     is_biltong: Callable[[str], bool]
     split_penalty: float = 0.0
     def check(self, item: HasItemAttrs, slot_items: List[HasItemAttrs], smoker_idx: int, phase: Phase) -> CheckOutcome:
-        if self.is_biltong(item.name or ""):  # biltong bez limitu
+        if self.is_biltong(item.name or ""):
             return CheckOutcome(kind="OK")
+
         cap = float(self.capacity.capacity_for(smoker_idx, self.raw_mass_of(item)[1]))
         if cap <= 0:
             return CheckOutcome(kind="OK")
+
         cur_raw = 0.0
         for it in slot_items:
-            r,_ = self.raw_mass_of(it)
+            r, _ = self.raw_mass_of(it)
             cur_raw += float(r or 0.0)
-        item_raw,_ = self.raw_mass_of(item)
+
+        item_raw, _ = self.raw_mass_of(item)
         if cur_raw + float(item_raw or 0.0) <= cap + 1e-9:
             return CheckOutcome(kind="OK")
+
         to_fit = max(cap - cur_raw, 0.0)
         if to_fit <= 1e-9:
-            return CheckOutcome(kind="BLOCK",
-                violation=RuleViolation("R-CAP-RAW","Kapacita slotu (syrové maso)",
-                                        f"Nulová rezerva v udírně #{smoker_idx}.", {"smoker": smoker_idx}))
-        if (item.qty or 0) <= 0:
-            return CheckOutcome(kind="BLOCK",
-                violation=RuleViolation("R-CAP-RAW","Kapacita slotu (syrové maso)",
-                                        f"Položka bez 'qty' se nedá dělit.", {"smoker": smoker_idx}))
+            return CheckOutcome(
+                kind="BLOCK",
+                violation=RuleViolation("R-CAP-RAW", "Kapacita slotu (syrové maso)",
+                                        f"Nulová rezerva v udírně #{smoker_idx}.", {"smoker": smoker_idx}),
+            )
+
+        # >>> změna tady: vezmi qty NEBO mnozstvi
+        qty_val = getattr(item, "qty", None)
+        if qty_val is None:
+            qty_val = getattr(item, "mnozstvi", None)
+        qty_val = float(qty_val or 0.0)
+
+        if qty_val <= 0:
+            return CheckOutcome(
+                kind="BLOCK",
+                violation=RuleViolation("R-CAP-RAW", "Kapacita slotu (syrové maso)",
+                                        "Položka bez množství se nedá dělit.", {"smoker": smoker_idx}),
+            )
+
         ratio = to_fit / max(float(item_raw or 0.0), 1e-9)
-        split_qty = float(item.qty) * ratio
-        remainder_qty = float(item.qty) - split_qty
-        return CheckOutcome(kind="SPLIT", penalty=self.split_penalty,
-                            split_qty=split_qty, remainder_qty=remainder_qty,
-                            violation=RuleViolation("R-CAP-RAW","Kapacita slotu (syrové maso)",
-                                                    "Položka se celá nevejde – rozdělím.", {"smoker": smoker_idx}))
+        split_qty = qty_val * ratio
+        remainder_qty = qty_val - split_qty
+
+        return CheckOutcome(
+            kind="SPLIT",
+            penalty=self.split_penalty,
+            split_qty=split_qty,
+            remainder_qty=remainder_qty,
+            violation=RuleViolation("R-CAP-RAW", "Kapacita slotu (syrové maso)",
+                                    "Položka se celá nevejde – rozdělím.", {"smoker": smoker_idx}),
+        )
 
 # --------- Auto-merge (stejný polotovar -> 1 řádek) ----------
 @dataclass
